@@ -3,9 +3,9 @@
 Independently recompute a Radix governance consultation's tally from Gateway state, and check it
 against the hash committed on-ledger.
 
-**Status: incomplete.** The canonical-serialization layer is done and cross-checked against the
-reference implementation. The weight recomputation — the part that makes this worth running — is
-not written yet. See [What works today](#what-works-today).
+**Status: working.** The full pipeline exists: weight recomputation from Gateway historical
+state, verdict re-derivation, canonical re-serialization, and the hash check, behind a CLI
+whose exit codes distinguish the three outcomes above.
 
 ---
 
@@ -58,13 +58,44 @@ noise:
   places, truncating division. No floats anywhere, and none may be introduced: an IEEE-754 double
   carries ~15–16 significant decimal digits and these values carry 18 after the point alone.
 - **`src/canonical.ts`** — the canonical JSON encoding and the blake2b-256 tally hash.
-- **`test/canonical.test.ts`** — cross-implementation agreement. The golden vector is not computed
-  here; it is the value the reference implementation pins in its own test suite. The two agreeing is
-  what makes the specification a specification.
+- **`src/gateway.ts`** — a minimal Gateway client pinned to an explicit `state_version`, covering
+  only the three endpoints the weight rule reads.
+- **`src/weights.ts`** — the weight rule itself: XRD plus validator stake units at their
+  redemption rate plus round-trip-verified native pool units, under the register the document
+  carries. Pool units held *by* a pool are not followed (one level), and non-fungible liquidity
+  positions are not counted — both deliberate, both inherited from the reference rule.
+- **`src/verdict.ts`** — quorum (both legs), the Binding gates (strict decisive ratio, MAS
+  floor), and the three seat rules (Plurality, SPAV, Majority Judgment) applied from the
+  document's own stated parameters.
+- **`src/verify.ts` / `src/cli.ts`** — orchestration and the command line.
+- **`test/`** — cross-implementation agreement, plus weight and verdict logic against fixture
+  Gateway responses. No test touches the network.
 
-Not yet written: the Gateway client, the weight recomputation, the verdict re-derivation, and the
-CLI. Until those exist this package can tell you a document has not been altered, not that it was
-right.
+What is deliberately not recomputed: the ballot set itself and the withdrawn-candidate set are
+indexer/ledger facts the Gateway historical endpoints used here do not serve; they are inputs,
+covered by the hash like everything else. `eligible_voting_power` is a creation-time figure and
+is likewise carried, not re-derived.
+
+## Running it
+
+```
+npm install && npm run build
+radix-tally-verify <tally.json | -> [--gateway URL] [--tally-hash HEX] [--xrd-resource ADDR]
+```
+
+The input may be the bare document or the API envelope (`{"document": …, "document_hash_blake2b":
+…}`). The gateway defaults to mainnet; the XRD resource address follows from the gateway URL
+(`mainnet` / `stokenet`), or pass `--xrd-resource` for anything else.
+
+Exit codes are the contract:
+
+| Code | Outcome |
+|---|---|
+| 0 | **Match** — every figure recomputes exactly, and the hash agrees when one was supplied |
+| 1 | **Figures disagree** — the real signal |
+| 2 | **Serialization disagreement** — figures match, hash differs; a spec departure, not a lie |
+| 3 | **Unknown** — gateway unreachable or the pinned state version pruned |
+| 4 | **Malformed** — the input is not a readable tally document |
 
 ## Running the tests
 

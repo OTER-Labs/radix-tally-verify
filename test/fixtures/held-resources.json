@@ -1,0 +1,49 @@
+{
+  "ledger_state": { "state_version": 1000000 },
+  "items": [
+    {
+      "address": "resource_rdx1lsu000000000000000000000000000000000000000000000001",
+      "details": { "total_supply": "2000" },
+      "explicit_metadata": { "items": [] }
+    },
+    {
+      "address": "resource_rdx1pu0000000000000000000000000000000000000000000000002",
+      "details": { "total_supply": "100" },
+      "explicit_metadata": {
+        "items": [
+          {
+            "key": "pool",
+            "value": {
+              "typed": {
+                "type": "String",
+                "value": "pool_rdx1ppp0000000000000000000000000000000000000000000000005"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "address": "resource_rdx1dust000000000000000000000000000000000000000000000003",
+      "details": { "total_supply": "1000000" },
+      "explicit_metadata": { "items": [] }
+    },
+    {
+      "address": "resource_rdx1fake000000000000000000000000000000000000000000000004",
+      "details": { "total_supply": "999999" },
+      "explicit_metadata": {
+        "items": [
+          {
+            "key": "pool",
+            "value": {
+              "typed": {
+                "type": "String",
+                "value": "pool_rdx1ppp0000000000000000000000000000000000000000000000005"
+              }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

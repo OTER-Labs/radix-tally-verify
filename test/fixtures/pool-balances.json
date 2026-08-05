@@ -1,0 +1,22 @@
+{
+  "ledger_state": { "state_version": 1000000 },
+  "items": [
+    {
+      "address": "pool_rdx1ppp0000000000000000000000000000000000000000000000005",
+      "fungible_resources": {
+        "total_count": 2,
+        "next_cursor": null,
+        "items": [
+          {
+            "resource_address": "resource_rdx1tknxxxxxxxxxradxrdxxxxxxxxx009923554798xxxxxxxxxradxrd",
+            "amount": "500"
+          },
+          {
+            "resource_address": "resource_rdx1lsu000000000000000000000000000000000000000000000001",
+            "amount": "40"
+          }
+        ]
+      }
+    }
+  ]
+}

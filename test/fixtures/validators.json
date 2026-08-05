@@ -1,0 +1,15 @@
+{
+  "ledger_state": { "state_version": 1000000 },
+  "validators": {
+    "next_cursor": null,
+    "items": [
+      {
+        "address": "validator_rdx1vvv",
+        "stake_vault": { "balance": "1000" },
+        "state": {
+          "stake_unit_resource_address": "resource_rdx1lsu000000000000000000000000000000000000000000000001"
+        }
+      }
+    ]
+  }
+}

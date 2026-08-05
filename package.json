@@ -8,7 +8,7 @@
     "node": ">=20"
   },
   "bin": {
-    "radix-tally-verify": "./dist/cli.js"
+    "radix-tally-verify": "./dist/src/cli.js"
   },
   "scripts": {
     "build": "tsc",

@@ -1,0 +1,35 @@
+{
+  "ledger_state": { "state_version": 1000000 },
+  "items": [
+    {
+      "address": "account_rdx1aaa",
+      "fungible_resources": {
+        "total_count": 2,
+        "next_cursor": null,
+        "items": [
+          {
+            "resource_address": "resource_rdx1tknxxxxxxxxxradxrdxxxxxxxxx009923554798xxxxxxxxxradxrd",
+            "amount": "100"
+          },
+          {
+            "resource_address": "resource_rdx1lsu000000000000000000000000000000000000000000000001",
+            "amount": "50"
+          }
+        ]
+      }
+    },
+    {
+      "address": "account_rdx1bbb",
+      "fungible_resources": {
+        "total_count": 3,
+        "next_cursor": "cursor-page-2",
+        "items": [
+          {
+            "resource_address": "resource_rdx1pu0000000000000000000000000000000000000000000000002",
+            "amount": "10"
+          }
+        ]
+      }
+    }
+  ]
+}

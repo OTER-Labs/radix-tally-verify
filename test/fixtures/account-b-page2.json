@@ -1,0 +1,14 @@
+{
+  "ledger_state": { "state_version": 1000000 },
+  "next_cursor": null,
+  "items": [
+    {
+      "resource_address": "resource_rdx1dust000000000000000000000000000000000000000000000003",
+      "amount": "7"
+    },
+    {
+      "resource_address": "resource_rdx1fake000000000000000000000000000000000000000000000004",
+      "amount": "999999"
+    }
+  ]
+}

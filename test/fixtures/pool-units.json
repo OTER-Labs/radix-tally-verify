@@ -1,0 +1,21 @@
+{
+  "ledger_state": { "state_version": 1000000 },
+  "items": [
+    {
+      "address": "pool_rdx1ppp0000000000000000000000000000000000000000000000005",
+      "explicit_metadata": {
+        "items": [
+          {
+            "key": "pool_unit",
+            "value": {
+              "typed": {
+                "type": "String",
+                "value": "resource_rdx1pu0000000000000000000000000000000000000000000000002"
+              }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}
