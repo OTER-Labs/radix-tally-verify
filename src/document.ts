@@ -9,11 +9,24 @@
  * document instead of surfacing later as an arithmetic surprise.
  */
 
+import { compareUtf8 } from "./canonical.ts";
 import { Dec } from "./decimal.ts";
 import type { Json } from "./canonical.ts";
 import { asArray, asObject, asString } from "./gateway.ts";
 import { GRADES } from "./verdict.ts";
 import type { WeightSources } from "./weights.ts";
+
+/**
+ * The document version this verifier is written against.
+ *
+ * 15 added the DAO-controlled-funds bar (framework 47ceb27, charter §5): the top-level
+ * `excluded_accounts` register and the per-ballot `excluded` flag. Nothing here GATES on the
+ * number — verification is driven by field presence, so a v14 document (no register, no flags)
+ * takes the absent-means-empty path and verifies byte-identically to how it did before v15
+ * existed. The constant is here to state which revision the field set below tracks, not to
+ * refuse the previous one.
+ */
+export const TALLY_DOC_VERSION = 15;
 
 /** The document could not be read as a tally document at all. Maps to exit 4, distinct from
  * all three verification outcomes: this is about the input, not about the tally. */
@@ -29,6 +42,12 @@ export interface TallyVote {
   selection: number[];
   /** The weight the document CLAIMS this account had. The recomputation replaces it. */
   weight: Dec;
+  /**
+   * The document's CLAIM that this ballot was barred under the DAO-controlled-funds rule. Like
+   * `weight`, a claim and not an input: the recomputation derives the flag from the document's
+   * own `excluded_accounts` register and compares. Absent (every v14 document) is false.
+   */
+  excluded: boolean;
 }
 
 export interface TallyDocument {
@@ -38,6 +57,14 @@ export interface TallyDocument {
   kind: string;
   snapshotStateVersion: number;
   weightSources: WeightSources;
+  /**
+   * Accounts the DAO controls, whose balances may not be voted (framework 47ceb27, charter §5).
+   * Carried inside the hashed document for exactly the reason `weight_sources` is: it is not
+   * recomputable from Gateway state, and a challenger who applied a different list would
+   * recompute a different tally and blame the arithmetic. `[]` when nothing is barred, which is
+   * also what an absent field (any v14 document) means.
+   */
+  excludedAccounts: string[];
   votes: TallyVote[];
   totals: Dec[];
   totalWeight: Dec;
@@ -158,6 +185,41 @@ function parseWeightSources(raw: unknown): WeightSources {
 }
 
 /**
+ * The DAO-controlled-funds register: a list of account addresses, ascending by UTF-8 bytes.
+ *
+ * Absent is `[]` and not an error — every v14 document predates the bar, and treating its
+ * absence as a malformed document would make this verifier unable to check the tallies it was
+ * written to check.
+ *
+ * Order is enforced, strictly. The array is content under the canonical encoding (rule 4: arrays
+ * keep their order), so two documents listing the same accounts in different orders hash
+ * differently while barring exactly the same ballots. A document whose register is out of order
+ * is therefore not one the reference implementation can have produced, and a duplicate entry —
+ * which strict ascent also rejects — is a second way to write the same list. Accepting either
+ * would be accepting a document whose hash nobody else will reproduce.
+ */
+function parseExcludedAccounts(raw: unknown): string[] {
+  if (raw === null || raw === undefined) return [];
+  if (!Array.isArray(raw)) fail("excluded_accounts", "is neither absent nor an array");
+  const out: string[] = [];
+  for (const entry of raw) {
+    const s = asString(entry);
+    if (s === null) fail("excluded_accounts", "contains a non-string");
+    out.push(s);
+  }
+  for (let i = 1; i < out.length; i++) {
+    if (compareUtf8(out[i - 1] as string, out[i] as string) >= 0) {
+      fail(
+        "excluded_accounts",
+        `is not strictly ascending by UTF-8 bytes at index ${i} ` +
+          `(${JSON.stringify(out[i - 1])} then ${JSON.stringify(out[i])})`,
+      );
+    }
+  }
+  return out;
+}
+
+/**
  * Parse and validate a tally document. Accepts either the bare document or the API envelope
  * (`{"document": …, "document_hash_blake2b": …}`); the envelope's hash is returned alongside
  * so the caller does not have to re-implement the unwrapping.
@@ -206,7 +268,14 @@ export function parseTallyDocument(input: unknown): { doc: TallyDocument; envelo
     } catch (e) {
       fail(`votes[${i}].weight`, `is not a canonical Decimal: ${e instanceof Error ? e.message : String(e)}`);
     }
-    return { account: account as string, selection, weight };
+    // A barred ballot stays in `votes` — that is the point of the design, since a verifier that
+    // never saw the ballot could not confirm the exclusion was applied. Absent is false, which
+    // is every ballot in every v14 document.
+    const excludedRaw = o["excluded"];
+    if (excludedRaw !== undefined && excludedRaw !== null && typeof excludedRaw !== "boolean") {
+      fail(`votes[${i}].excluded`, "is neither absent nor a boolean");
+    }
+    return { account: account as string, selection, weight, excluded: excludedRaw === true };
   });
 
   const snapshotStateVersion = reqInt(raw, "snapshot_state_version");
@@ -223,6 +292,7 @@ export function parseTallyDocument(input: unknown): { doc: TallyDocument; envelo
     kind,
     snapshotStateVersion,
     weightSources: parseWeightSources(raw["weight_sources"]),
+    excludedAccounts: parseExcludedAccounts(raw["excluded_accounts"]),
     votes,
     totals,
     totalWeight: reqDec(raw, "total_weight"),

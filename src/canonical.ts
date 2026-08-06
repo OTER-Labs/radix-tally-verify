@@ -25,8 +25,12 @@ export type Json = null | boolean | number | string | Json[] | { [k: string]: Js
  * differently under each, and the resulting documents hash differently while looking identical.
  * Every key in a tally document is ASCII today, where all three orderings coincide — this is here
  * so that stays true by construction rather than by luck.
+ *
+ * Exported because it is not only the key order: `excluded_accounts` is specified as an array
+ * sorted ascending by the same UTF-8 byte order, and a second comparator written for that would
+ * be a second chance to get it wrong.
  */
-function compareUtf8(a: string, b: string): number {
+export function compareUtf8(a: string, b: string): number {
   const ba = new TextEncoder().encode(a);
   const bb = new TextEncoder().encode(b);
   const n = Math.min(ba.length, bb.length);

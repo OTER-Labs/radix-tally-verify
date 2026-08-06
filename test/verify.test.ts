@@ -9,6 +9,7 @@ import { test } from "node:test";
 
 import { tallyHash } from "../src/canonical.ts";
 import type { Json } from "../src/canonical.ts";
+import { TALLY_DOC_VERSION } from "../src/document.ts";
 import { GatewayError } from "../src/gateway.ts";
 import type { GatewayClient } from "../src/gateway.ts";
 import { verifyTallyDocument } from "../src/verify.ts";
@@ -19,7 +20,8 @@ import { ACCOUNT_A, ACCOUNT_B, XRD, scenarioGateway } from "./fake-gateway.ts";
  * B weighs 52, both approve. quorum 100 with a 2-voter floor, threshold 50, MAS 10. */
 function goodDocument(): Record<string, Json> {
   return {
-    tally_doc_version: 14,
+    tally_doc_version: TALLY_DOC_VERSION,
+    excluded_accounts: [],
     consultation_id: "consultation:test",
     title: "Should the fixture pass?",
     kind: "Binding",
@@ -131,4 +133,137 @@ test("gateway trouble is UNKNOWN, never a discrepancy", async () => {
 test("a document that is not a tally document is MALFORMED, a fourth thing entirely", async () => {
   const outcome = await verifyTallyDocument({ hello: "world" }, null, new DeadGateway(), XRD);
   assert.equal(outcome.kind, "malformed");
+});
+
+/* ------------------------------------------------------------------------------------------
+ * The DAO-controlled-funds bar (v15). A barred ballot stays in `votes` carrying `excluded:
+ * true`; the register that decides which ballots those are travels at the top level, inside the
+ * hash, for the same reason `weight_sources` does.
+ * ---------------------------------------------------------------------------------------- */
+
+/**
+ * The fixture consultation with account A barred. A's 125 reaches nothing: totals, total_weight,
+ * voter_count and the verdict are all as if A had stayed away — which drops the tally under its
+ * unchanged quorum of 100, since only B's 52 is left.
+ */
+function barredDocument(): Record<string, Json> {
+  const doc = goodDocument();
+  doc["excluded_accounts"] = [ACCOUNT_A];
+  doc["votes"] = [
+    { account: ACCOUNT_A, selection: [1], weight: "125", excluded: true },
+    { account: ACCOUNT_B, selection: [1], weight: "52" },
+  ];
+  doc["totals"] = ["0", "52"];
+  doc["total_weight"] = "52";
+  doc["voter_count"] = 1;
+  doc["min_unique_voters"] = 1; // so the weight leg is the only thing that can fail
+  doc["quorum_met"] = false;
+  doc["mas_met"] = true; // 52 clears the MAS floor of 10 — the quorum leg is what refuses
+  doc["approve_weight"] = "52";
+  doc["reject_weight"] = "0";
+  doc["approved"] = false;
+  return doc;
+}
+
+test("a document barring an account under the DAO-controlled-funds rule is a MATCH", async () => {
+  const doc = barredDocument();
+  const outcome = await verifyTallyDocument(doc, tallyHash(doc), scenarioGateway(), XRD);
+  assert.deepEqual(outcome, { kind: "match", hashChecked: true });
+});
+
+test("the barred account's published weight is still recomputed and checked", async () => {
+  // Excluding a ballot does not put its weight beyond challenge. If it did, "excluded" would be
+  // a place to hide a wrong figure.
+  const doc = barredDocument();
+  (doc["votes"] as Array<Record<string, Json>>)[0] = {
+    account: ACCOUNT_A,
+    selection: [1],
+    weight: "999",
+    excluded: true,
+  };
+  const outcome = await verifyTallyDocument(doc, null, scenarioGateway(), XRD);
+  assert.equal(outcome.kind, "figures");
+  if (outcome.kind !== "figures") return;
+  assert.equal(outcome.differences.length, 1);
+  assert.match(outcome.differences[0]?.field ?? "", /votes\[0\]\.weight/);
+  assert.equal(outcome.differences[0]?.recomputed, "125");
+});
+
+test("a ballot flagged excluded that the register does not bar is FIGURES", async () => {
+  // The flag is a claim; the register decides. A publisher that dropped a ballot from the tally
+  // without listing the account is asserting an exclusion nobody can check — and the recomputed
+  // figures, which counted that ballot, say so.
+  const doc = goodDocument();
+  (doc["votes"] as Array<Record<string, Json>>)[0] = {
+    account: ACCOUNT_A,
+    selection: [1],
+    weight: "125",
+    excluded: true,
+  };
+  const outcome = await verifyTallyDocument(doc, null, scenarioGateway(), XRD);
+  assert.equal(outcome.kind, "figures");
+  if (outcome.kind !== "figures") return;
+  const fields = outcome.differences.map((d) => d.field);
+  assert.ok(
+    fields.some((f) => /votes\[0\]\.excluded/.test(f)),
+    `the unbacked flag itself must be reported, got ${JSON.stringify(fields)}`,
+  );
+});
+
+test("a barred account whose ballot was counted anyway is FIGURES", async () => {
+  // The mirror image: the register bars A, but the published figures still contain A's 125.
+  const doc = goodDocument();
+  doc["excluded_accounts"] = [ACCOUNT_A];
+  const outcome = await verifyTallyDocument(doc, null, scenarioGateway(), XRD);
+  assert.equal(outcome.kind, "figures");
+  if (outcome.kind !== "figures") return;
+  const fields = outcome.differences.map((d) => d.field);
+  for (const expected of ["totals[1]", "total_weight", "voter_count", "quorum_met"]) {
+    assert.ok(fields.includes(expected), `${expected} must differ, got ${JSON.stringify(fields)}`);
+  }
+});
+
+test("an excluded_accounts register that is not strictly ascending is MALFORMED", async () => {
+  // Arrays are content under the canonical encoding, so the order is part of what the hash
+  // commits to: a register the reference implementation cannot have emitted is not a document
+  // whose hash anyone will reproduce.
+  const doc = barredDocument();
+  doc["excluded_accounts"] = [ACCOUNT_B, ACCOUNT_A];
+  const outcome = await verifyTallyDocument(doc, null, scenarioGateway(), XRD);
+  assert.equal(outcome.kind, "malformed");
+  if (outcome.kind === "malformed") assert.match(outcome.reason, /excluded_accounts/);
+});
+
+/**
+ * A v14 document: no `excluded_accounts`, no `excluded` flags, the field set exactly as it was
+ * before the bar existed. It must verify precisely as it did then — an absent register is `[]`
+ * and an absent flag is `false`, so nothing is barred and every figure is the old one.
+ */
+function v14Document(): Record<string, Json> {
+  const doc = goodDocument();
+  doc["tally_doc_version"] = 14;
+  delete doc["excluded_accounts"];
+  return doc;
+}
+
+test("a v14 document, with neither the register nor the flags, verifies exactly as before", async () => {
+  const doc = v14Document();
+  assert.equal("excluded_accounts" in doc, false, "the fixture must really be the old field set");
+  const outcome = await verifyTallyDocument(doc, tallyHash(doc), scenarioGateway(), XRD);
+  assert.deepEqual(outcome, { kind: "match", hashChecked: true });
+});
+
+test("a v14 document still hashes to the bytes it always did", async () => {
+  // Pinned, not recomputed from the fixture: the point is that adding v15's field did not move
+  // the canonical form of a document that does not carry it. If this constant has to change,
+  // every tally published before the bar has stopped verifying.
+  assert.equal(
+    tallyHash(v14Document()),
+    "f2a3556fb7ef45d7b71b69c02c230f5ae90d961c5fe8eca619f26f4558a0f022",
+    "the canonical bytes of this exact document under the code as it stood before v15",
+  );
+  // And the figures still recompute against it, so the hash above is a hash of a VALID document
+  // rather than of whatever this fixture drifted into.
+  const outcome = await verifyTallyDocument(v14Document(), null, scenarioGateway(), XRD);
+  assert.deepEqual(outcome, { kind: "match", hashChecked: false });
 });

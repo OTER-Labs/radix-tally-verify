@@ -67,8 +67,19 @@ export function compareFigures(doc: TallyDocument, derived: DerivedFigures): Dif
 
   for (let i = 0; i < doc.votes.length; i++) {
     const vote = doc.votes[i] as (typeof doc.votes)[number];
+    // A barred ballot's weight is still checked. It has to be: the published weight is what the
+    // exclusion kept out of the tally, and a verifier that stopped recomputing it could not tell
+    // a correctly barred account from one whose weight was quietly wrong.
     const recomputed = derived.weights.get(vote.account) ?? Dec.ZERO;
     check(`votes[${i}].weight (${vote.account})`, vote.weight.toString(), recomputed.toString());
+    // And the flag is a claim like any other: the register decides, the flag is checked against
+    // it. A ballot flagged excluded whose account is not in the register — or an account in the
+    // register whose ballot was silently counted — is a figure difference, not a formatting one.
+    check(
+      `votes[${i}].excluded (${vote.account})`,
+      String(vote.excluded),
+      String(derived.voteExcluded[i] ?? false),
+    );
   }
 
   const totalsLen = Math.max(doc.totals.length, derived.totals.length);
@@ -139,6 +150,7 @@ export async function verifyTallyDocument(
         minAffirmativeSupport: doc.minAffirmativeSupport,
         minUniqueVoters: doc.minUniqueVoters,
         excluded: doc.withdrawnExcluded ?? [],
+        excludedAccounts: doc.excludedAccounts,
       },
       doc.votes,
       weights,

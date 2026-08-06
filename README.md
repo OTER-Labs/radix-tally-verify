@@ -35,7 +35,9 @@ this tool:
 1. **Recomputes each voter's weight** from Radix Gateway historical state at the snapshot the
    document pins — XRD plus validator stake units at their redemption rate, plus whatever the
    document's own source register says counts.
-2. **Re-derives the verdict** by applying the document's stated rules to those weights.
+2. **Re-derives the verdict** by applying the document's stated rules to those weights — including
+   the DAO-controlled-funds bar, which strikes ballots cast from accounts the document's
+   `excluded_accounts` register names.
 3. **Re-serializes and re-hashes** the result, and compares against the `tally_hash` committed
    on-ledger.
 
@@ -65,16 +67,51 @@ noise:
   carries. Pool units held *by* a pool are not followed (one level), and non-fungible liquidity
   positions are not counted — both deliberate, both inherited from the reference rule.
 - **`src/verdict.ts`** — quorum (both legs), the Binding gates (strict decisive ratio, MAS
-  floor), and the three seat rules (Plurality, SPAV, Majority Judgment) applied from the
-  document's own stated parameters.
+  floor), the DAO-controlled-funds bar, and the three seat rules (Plurality, SPAV, Majority
+  Judgment) applied from the document's own stated parameters.
 - **`src/verify.ts` / `src/cli.ts`** — orchestration and the command line.
 - **`test/`** — cross-implementation agreement, plus weight and verdict logic against fixture
   Gateway responses. No test touches the network.
 
-What is deliberately not recomputed: the ballot set itself and the withdrawn-candidate set are
-indexer/ledger facts the Gateway historical endpoints used here do not serve; they are inputs,
-covered by the hash like everything else. `eligible_voting_power` is a creation-time figure and
-is likewise carried, not re-derived.
+What is deliberately not recomputed: the ballot set itself, the withdrawn-candidate set and the
+`excluded_accounts` register are indexer/ledger facts the Gateway historical endpoints used here do
+not serve; they are inputs, covered by the hash like everything else. `eligible_voting_power` is a
+creation-time figure and is likewise carried, not re-derived.
+
+## The DAO-controlled-funds bar
+
+The framework's charter §5 says *"Funds under the DAO's control may not be used for governance
+participation. No balance in an account the DAO controls may be voted, delegated, or used to file
+or support any governance action"* — and, in the same breath, that *"this determines who may vote;
+it does not change how quorum is measured."*
+
+Document version **15** carries two things for it:
+
+- **`excluded_accounts`** — the barred accounts, ascending by UTF-8 bytes, `[]` when nothing is
+  barred. It sits beside `weight_sources` and inside the hash for the same reason that one does: a
+  challenger who applied a different list would recompute a different tally and blame the
+  arithmetic.
+- **`"excluded": true`** on the ballots it strikes. The barred ballot **stays in `votes`**. It has
+  to: a verifier that never saw the ballot could not confirm the exclusion was applied, only that
+  something is missing.
+
+A barred ballot is **not a vote**. It reaches no option total, no `total_weight`, no
+`abstain_weight` (a barred empty selection abstains from nothing), no `voter_count`, no Majority
+Judgment grade weight and no candidate's `cast`. It is the account that did not vote.
+
+Quorum keeps its exact form — `total_weight >= quorum AND voter_count >= min_unique_voters` —
+measured over what is left. No threshold is rescaled to compensate: the barred account never had a
+vote to withdraw. Striking a large enough holder can therefore *lose* a consultation its quorum,
+and that is the correct answer, not a rounding problem to be smoothed away.
+
+Both the register and the flags are checked, not believed. The register decides; each ballot's
+`excluded` flag is a published claim compared against it, and the barred account's published
+`weight` is still recomputed from Gateway state — otherwise `excluded` would be a place to hide a
+wrong figure.
+
+**Version 14 documents keep verifying.** An absent register is `[]` and an absent flag is `false`,
+so a document written before the bar existed takes the same path it always did and hashes to the
+same bytes.
 
 ## Running it
 

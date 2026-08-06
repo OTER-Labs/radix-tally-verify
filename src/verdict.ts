@@ -30,6 +30,13 @@ export const MINIMUM_QUALIFYING_GRADE = 2;
 export interface Ballot {
   weight: Dec;
   selection: number[];
+  /**
+   * Where this ballot sits in the document's `votes` array, when that is not simply its position
+   * in the ballot list. Majority Judgment reports `invalid_ballots` by index, and a barred ballot
+   * is dropped before the tally — so without this the first exclusion would silently renumber
+   * every invalid ballot after it, and the document's report would point at the wrong voters.
+   */
+  ballotIndex?: number;
 }
 
 /** Everything about the consultation the verdict needs, taken from the document. */
@@ -49,6 +56,18 @@ export interface VerdictSpec {
    * `withdrawn_excluded` (null = the exclusion was not in force, [] = it was and nobody
    * stood down). Not recomputable from Gateway state; it is an input like the ballots. */
   excluded: number[];
+  /**
+   * Accounts barred by the DAO-controlled-funds rule — the document's `excluded_accounts`. A
+   * ballot from one of these is NOT A VOTE: it reaches no total, no weight sum, no abstention, no
+   * grade, and is not a voter. It is the account that did not vote.
+   *
+   * Note what this is NOT: it is not a quorum adjustment. Quorum keeps its form exactly —
+   * `total_weight >= quorum AND voter_count >= min_unique_voters` — measured over what is left.
+   * The barred account never had a vote to withdraw, so there is no threshold to rescale, and
+   * rescaling one would be inventing a rule the framework did not write ("this determines who may
+   * vote; it does not change how quorum is measured").
+   */
+  excludedAccounts: string[];
 }
 
 export interface MjCandidate {
@@ -74,6 +93,10 @@ export interface DerivedFigures {
   totalWeight: Dec;
   abstainWeight: Dec;
   voterCount: number;
+  /** Per entry of the document's `votes`, in order: was this ballot barred? Derived from the
+   * register, so the document's own `excluded` flags can be checked against it rather than
+   * believed. */
+  voteExcluded: boolean[];
   quorumMet: boolean;
   masMet: boolean | null;
   approveWeight: Dec | null;
@@ -234,10 +257,10 @@ export function allocateSeatsMajorityJudgment(
   for (let c = 0; c < candidateCount; c++) byGrade.push(new Array<Dec>(GRADES.length).fill(Dec.ZERO));
   const invalidBallots: number[] = [];
 
-  ballots.forEach((ballot, ballotIndex) => {
+  ballots.forEach((ballot, position) => {
     const grades = decodeMjBallot(ballot.selection, candidateCount);
     if (grades === null) {
-      invalidBallots.push(ballotIndex);
+      invalidBallots.push(ballot.ballotIndex ?? position);
       return;
     }
     grades.forEach((grade, candidate) => {
@@ -330,6 +353,12 @@ function majorityJudgmentJson(r: MjResult): Json {
  * option space is the statement of how many candidates there were. Approval voting: each
  * selected option receives the voter's full weight. An empty selection is an abstention —
  * its weight counts toward total_weight (and therefore quorum) and toward no option.
+ *
+ * Unless the account is barred. A ballot from an account in `spec.excludedAccounts` is skipped
+ * whole, before any of that: no total, no total_weight, no abstention (a barred empty selection
+ * abstains from nothing — it is not a participant), no voter, no grade, no `cast`. The single
+ * `continue` below is the entire rule, and it is written once precisely so no aggregate can be
+ * added later that quietly forgets it.
  */
 export function deriveFigures(
   spec: VerdictSpec,
@@ -345,7 +374,18 @@ export function deriveFigures(
   let abstainWeight = Dec.ZERO;
   const ballots: Ballot[] = [];
 
-  for (const vote of votes) {
+  const barred = new Set(spec.excludedAccounts);
+  const voteExcluded: boolean[] = [];
+  let voterCount = 0;
+
+  for (let i = 0; i < votes.length; i++) {
+    const vote = votes[i] as (typeof votes)[number];
+    if (barred.has(vote.account)) {
+      voteExcluded.push(true);
+      continue;
+    }
+    voteExcluded.push(false);
+    voterCount++;
     const weight = weights.get(vote.account) ?? Dec.ZERO;
     totalWeight = totalWeight.add(weight);
     if (vote.selection.length === 0) abstainWeight = abstainWeight.add(weight);
@@ -353,12 +393,18 @@ export function deriveFigures(
       const t = totals[idx];
       if (t !== undefined) totals[idx] = t.add(weight);
     }
-    ballots.push({ weight, selection: vote.selection.filter((i) => i >= 0 && i < optionCount) });
+    ballots.push({
+      weight,
+      selection: vote.selection.filter((i) => i >= 0 && i < optionCount),
+      ballotIndex: i,
+    });
   }
 
-  // Quorum has two legs: enough weight, and (when a floor is set) enough distinct voters.
-  // One ballot per account in the document, so votes.length IS the distinct-voter count.
-  const quorumMet = totalWeight.gte(spec.quorum) && votes.length >= spec.minUniqueVoters;
+  // Quorum has two legs: enough weight, and (when a floor is set) enough distinct voters. One
+  // ballot per account in the document, so the count of ballots that ARE votes is the
+  // distinct-voter count. The form is untouched by the bar: barred weight and barred voters were
+  // never in the measurement, and neither threshold moves to compensate.
+  const quorumMet = totalWeight.gte(spec.quorum) && voterCount >= spec.minUniqueVoters;
 
   // Approve/Reject only mean something for a Binding consultation, whose option list is fixed
   // at [Reject, Approve]. Elsewhere there is no single affirmative side, so the verdict is
@@ -400,7 +446,8 @@ export function deriveFigures(
     totals,
     totalWeight,
     abstainWeight,
-    voterCount: votes.length,
+    voterCount,
+    voteExcluded,
     quorumMet,
     masMet,
     approveWeight,

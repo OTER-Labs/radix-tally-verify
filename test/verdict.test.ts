@@ -23,7 +23,7 @@ import {
   bindingApproved,
   deriveFigures,
 } from "../src/verdict.ts";
-import type { Ballot, VerdictSpec } from "../src/verdict.ts";
+import type { Ballot, DerivedFigures, VerdictSpec } from "../src/verdict.ts";
 
 const d = (v: number): Dec => Dec.fromInt(BigInt(v));
 const NONE: number[] = [];
@@ -193,6 +193,7 @@ test("an abstention counts toward quorum and toward no option", () => {
     minAffirmativeSupport: d(10),
     minUniqueVoters: 0,
     excluded: [],
+    excludedAccounts: [],
   };
   const votes = [
     { account: "a", selection: [] }, // abstains — carries the consultation over quorum
@@ -220,6 +221,7 @@ test("quorum has two legs and both must hold", () => {
     minAffirmativeSupport: d(0),
     minUniqueVoters: 3,
     excluded: [],
+    excludedAccounts: [],
   };
   const votes = [
     { account: "a", selection: [0] },
@@ -233,6 +235,208 @@ test("quorum has two legs and both must hold", () => {
   assert.equal(f.quorumMet, false, "weight enough, voters not — both legs are required");
 });
 
+/**
+ * The DAO-controlled-funds bar (framework 47ceb27, charter §5): "No balance in an account the
+ * DAO controls may be voted, delegated, or used to file or support any governance action."
+ *
+ * The barred ballot stays in the document — that is what makes the exclusion checkable — but it
+ * is NOT A VOTE. The tests below pin each aggregate separately rather than one composite
+ * assertion, because the failure mode this rule invites is an implementation that remembers the
+ * option totals and forgets `abstain_weight`, or remembers both and still counts the voter.
+ */
+
+const DAO = "account_rdx1dao_controlled";
+
+/** A Binding spec over a two-option ballot, with whatever the test wants to vary. */
+function bindingSpec(over: Partial<VerdictSpec> = {}): VerdictSpec {
+  return {
+    kind: "Binding",
+    optionCount: 2,
+    seats: 0,
+    seatRule: null,
+    quorum: d(100),
+    approvalThresholdPc: d(50),
+    minAffirmativeSupport: d(10),
+    minUniqueVoters: 1,
+    excluded: [],
+    excludedAccounts: [],
+    ...over,
+  };
+}
+
+test("a barred ballot reaches no aggregate at all — it is the account that did not vote", () => {
+  const votes = [
+    { account: DAO, selection: [1] },
+    { account: "a", selection: [1] },
+    { account: "b", selection: [0] },
+  ];
+  const weights = new Map([
+    [DAO, d(1000)],
+    ["a", d(60)],
+    ["b", d(50)],
+  ]);
+
+  const counted = deriveFigures(bindingSpec(), votes, weights);
+  assert.equal(counted.totals[1]?.toString(), "1060", "control: unbarred, the DAO's weight lands");
+
+  const f = deriveFigures(bindingSpec({ excludedAccounts: [DAO] }), votes, weights);
+  assert.equal(f.totals[0]?.toString(), "50", "no option total");
+  assert.equal(f.totals[1]?.toString(), "60", "not even the option it selected");
+  assert.equal(f.totalWeight.toString(), "110", "not total_weight");
+  assert.equal(f.abstainWeight.toString(), "0", "not abstain_weight");
+  assert.equal(f.voterCount, 2, "not voter_count — three ballots, two voters");
+  assert.deepEqual(f.voteExcluded, [true, false, false], "and the bar is reported per ballot");
+  // The same figures as a tally where the DAO simply never voted.
+  const absent = deriveFigures(bindingSpec(), votes.slice(1), weights);
+  assert.equal(f.totals[1]?.toString(), absent.totals[1]?.toString());
+  assert.equal(f.totalWeight.toString(), absent.totalWeight.toString());
+  assert.equal(f.voterCount, absent.voterCount);
+});
+
+test("dropping the barred ballot can lose quorum, and the threshold does not move to save it", () => {
+  // The DAO holds 1000 of the 1060 cast. Barred, 60 is left against a quorum of 100.
+  const votes = [
+    { account: DAO, selection: [1] },
+    { account: "a", selection: [1] },
+  ];
+  const weights = new Map([
+    [DAO, d(1000)],
+    ["a", d(60)],
+  ]);
+  const spec = bindingSpec({ excludedAccounts: [DAO] });
+
+  assert.equal(deriveFigures(bindingSpec(), votes, weights).quorumMet, true, "control: 1060 >= 100");
+
+  const f = deriveFigures(spec, votes, weights);
+  assert.equal(
+    f.quorumMet,
+    false,
+    "60 < the stated quorum of 100. An implementation that rescaled the quorum to the " +
+      "unbarred electorate would pass here — the framework says the bar 'determines who may " +
+      "vote; it does not change how quorum is measured'",
+  );
+  assert.equal(f.approved, false, "and no quorum is no approval, whatever the ratio says");
+  // The quorum that IS applied is the document's own, unaltered: 60 clears a stated 60.
+  assert.equal(
+    deriveFigures(bindingSpec({ excludedAccounts: [DAO], quorum: d(60) }), votes, weights).quorumMet,
+    true,
+    "a floor reached is a floor met — the figure compared against is the one the document states",
+  );
+});
+
+test("the barred ballot is not a voter, so the unique-voter leg can fail on its own", () => {
+  const votes = [
+    { account: DAO, selection: [1] },
+    { account: "a", selection: [1] },
+  ];
+  const weights = new Map([
+    [DAO, d(10)],
+    ["a", d(500)],
+  ]);
+  const spec = bindingSpec({ excludedAccounts: [DAO], minUniqueVoters: 2 });
+  const f = deriveFigures(spec, votes, weights);
+  assert.equal(f.totalWeight.toString(), "500", "weight enough on its own");
+  assert.equal(f.voterCount, 1);
+  assert.equal(f.quorumMet, false, "one voter against a floor of two — both legs are required");
+});
+
+test("a barred EMPTY selection is not an abstention: it abstains from nothing", () => {
+  const votes = [
+    { account: DAO, selection: [] },
+    { account: "a", selection: [1] },
+  ];
+  const weights = new Map([
+    [DAO, d(1000)],
+    ["a", d(200)],
+  ]);
+  assert.equal(
+    deriveFigures(bindingSpec(), votes, weights).abstainWeight.toString(),
+    "1000",
+    "control: unbarred, an empty selection IS an abstention",
+  );
+  const f = deriveFigures(bindingSpec({ excludedAccounts: [DAO] }), votes, weights);
+  assert.equal(f.abstainWeight.toString(), "0", "barred, it is not one");
+  assert.equal(f.totalWeight.toString(), "200", "abstaining weight counts toward quorum — this does not");
+});
+
+/** The recomputed `majority_judgment` block, typed enough to assert against. */
+function mjBlock(f: DerivedFigures): {
+  candidates: Array<{ by_grade: string[]; cast: string; qualifying_grade: number | null }>;
+  invalid_ballots: number[];
+} {
+  return f.majorityJudgment as unknown as {
+    candidates: Array<{ by_grade: string[]; cast: string; qualifying_grade: number | null }>;
+    invalid_ballots: number[];
+  };
+}
+
+const mjSpec = (candidates: number, over: Partial<VerdictSpec> = {}): VerdictSpec => ({
+  kind: "Election",
+  optionCount: candidates * GRADES.length,
+  seats: candidates,
+  seatRule: "MajorityJudgment",
+  quorum: d(100),
+  approvalThresholdPc: d(0),
+  minAffirmativeSupport: d(0),
+  minUniqueVoters: 0,
+  excluded: [],
+  excludedAccounts: [],
+  ...over,
+});
+
+test("MJ: a barred ballot's grades are absent from by_grade and from cast", () => {
+  // The DAO grades both candidates Excellent with ten times everyone else's weight. Counted, it
+  // decides the grade distribution outright; barred, it must not appear in it anywhere.
+  const grades = (g: number[]): number[] => g.map((x, c) => c * GRADES.length + x);
+  const votes = [
+    { account: DAO, selection: grades([0, 0]) },
+    { account: "a", selection: grades([2, 2]) },
+    { account: "b", selection: grades([2, 2]) },
+  ];
+  const weights = new Map([
+    [DAO, d(1000)],
+    ["a", d(60)],
+    ["b", d(40)],
+  ]);
+
+  const counted = mjBlock(deriveFigures(mjSpec(2), votes, weights));
+  assert.equal(counted.candidates[0]?.cast, "1100", "control: cast includes the DAO");
+  assert.equal(counted.candidates[0]?.by_grade[0], "1000", "control: its Excellent weight is there");
+  assert.equal(counted.candidates[0]?.qualifying_grade, 0, "control: and it sets the qualifying grade");
+
+  const f = deriveFigures(mjSpec(2, { excludedAccounts: [DAO] }), votes, weights);
+  const mjb = mjBlock(f);
+  for (const c of mjb.candidates) {
+    assert.deepEqual(c.by_grade, ["0", "0", "100", "0", "0"], "no barred weight in any grade bucket");
+    assert.equal(c.cast, "100", "cast is the weight that actually graded the candidate");
+    assert.equal(c.qualifying_grade, 2, "Good, not the Excellent the barred ballot would have bought");
+  }
+  assert.deepEqual(f.winners, [0, 1]);
+  assert.deepEqual(mjb.invalid_ballots, []);
+});
+
+test("MJ: invalid_ballots keeps indexing the document's votes, not the surviving subset", () => {
+  // The barred ballot sits at index 0. The malformed one at index 1 must still be reported as 1
+  // — renumbering it to 0 would point the report at the wrong voter, and at a voter whose ballot
+  // was not even counted.
+  const votes = [
+    { account: DAO, selection: [0, GRADES.length] }, // a complete, valid MJ ballot
+    { account: "x", selection: [0] }, // one grade for two candidates: invalid
+    { account: "y", selection: [2, GRADES.length + 2] },
+  ];
+  const weights = new Map([
+    [DAO, d(1000)],
+    ["x", d(10)],
+    ["y", d(100)],
+  ]);
+  const f = deriveFigures(mjSpec(2, { excludedAccounts: [DAO], quorum: d(0) }), votes, weights);
+  assert.deepEqual(
+    mjBlock(f).invalid_ballots,
+    [1],
+    "the malformed ballot keeps its position in `votes`",
+  );
+});
+
 test("a consultation that missed quorum seats nobody", () => {
   const spec: VerdictSpec = {
     kind: "Election",
@@ -244,6 +448,7 @@ test("a consultation that missed quorum seats nobody", () => {
     minAffirmativeSupport: d(0),
     minUniqueVoters: 0,
     excluded: [],
+    excludedAccounts: [],
   };
   const votes = [{ account: "a", selection: [0, 1] }];
   const weights = new Map([["a", d(10)]]);
