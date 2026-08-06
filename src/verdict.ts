@@ -8,20 +8,24 @@
  * verifier that hardcoded a rule would be checking its own assumptions, not the document.
  *
  * The arithmetic is scrypto Decimal throughout (src/decimal.ts), truncating division and all:
- * SPAV divides by an integer round count and Majority Judgment's "exact halves resolve
- * upward" is only exact because the comparison never divides.
+ * SPAV divides by an integer round count, and Majority Judgment's qualifying grade — the
+ * Grade Quantile of THREE-FIFTHS of the weight cast, not the median (the framework moved off
+ * the median on 2026-08-05) — resolves exactly on the boundary only because the comparison is
+ * a cross-multiplication, never a division.
  */
 
 import { Dec } from "./decimal.ts";
 import type { Json } from "./canonical.ts";
 
 /** The five grades of the framework's scale, highest first. Ordinal 0 is Excellent, 4 is
- * Poor — the ordering is load-bearing, since "at or above grade g" is the whole median rule. */
+ * Poor — the ordering is load-bearing, since "at or above grade g" is the whole qualifying
+ * rule. */
 export const GRADES = ["Excellent", "Very Good", "Good", "Acceptable", "Poor"] as const;
 
-/** Lowest median grade at which a candidate may be seated ("Good"). An ordinal, so the
- * comparison is `median <= MINIMUM_MEDIAN_GRADE` — lower ordinal is better. */
-export const MINIMUM_MEDIAN_GRADE = 2;
+/** Lowest qualifying grade at which a candidate may be seated ("Good"). An ordinal, so the
+ * comparison is `qualifying <= MINIMUM_QUALIFYING_GRADE` — lower ordinal is better. Unchanged
+ * by the 2026-08-05 median -> three-fifths move: the floor is a grade, not a quantile. */
+export const MINIMUM_QUALIFYING_GRADE = 2;
 
 export interface Ballot {
   weight: Dec;
@@ -51,7 +55,7 @@ export interface MjCandidate {
   candidateIndex: number;
   byGrade: Dec[];
   cast: Dec;
-  median: number | null;
+  qualifying: number | null;
   above: Dec;
   below: Dec;
 }
@@ -187,17 +191,21 @@ function decodeMjBallot(selection: number[], candidateCount: number): number[] |
 }
 
 /**
- * Median grade: the highest grade at which the weight grading the candidate at or above that
- * grade reaches half the weight cast for them. Compared as `atOrAbove * 2 >= cast` rather
- * than against `cast / 2`, so "exact halves resolve upward" is exact rather than an artifact
- * of truncating fixed-point division.
+ * Qualifying grade: the highest grade at which the weight grading the candidate at or above
+ * that grade reaches the Grade Quantile of the weight cast for them.
+ *
+ * The Grade Quantile is THREE-FIFTHS, not the median — the framework moved off the median on
+ * 2026-08-05 (Shadaffy/radix-dao-governance b98269e), which also renamed "median grade" to
+ * "qualifying grade". Compared as `atOrAbove * 5 >= cast * 3` rather than against
+ * `cast.mul(3).div(5)`, so a candidate sitting exactly on the quantile resolves upward exactly,
+ * rather than by whichever way truncating fixed-point division happened to fall.
  */
-function medianGrade(byGrade: Dec[], cast: Dec): number | null {
+function qualifyingGrade(byGrade: Dec[], cast: Dec): number | null {
   if (!cast.isPositive()) return null;
   let atOrAbove = Dec.ZERO;
   for (let ordinal = 0; ordinal < byGrade.length; ordinal++) {
     atOrAbove = atOrAbove.add(byGrade[ordinal] as Dec);
-    if (atOrAbove.mul(Dec.fromInt(2)).gte(cast)) return ordinal;
+    if (atOrAbove.mul(Dec.fromInt(5)).gte(cast.mul(Dec.fromInt(3)))) return ordinal;
   }
   // Unreachable while cast is the sum of byGrade, but a fallback beats a crash in a tally a
   // challenger is entitled to run on inputs nobody chose.
@@ -205,16 +213,16 @@ function medianGrade(byGrade: Dec[], cast: Dec): number | null {
 }
 
 /**
- * Majority Judgment: tally every ballot into per-candidate grade distributions, medians and
- * gauges, then rank the seatable candidates and fill `seats`.
+ * Majority Judgment: tally every ballot into per-candidate grade distributions, qualifying
+ * grades and gauges, then rank the seatable candidates and fill `seats`.
  *
  * Seating order: withdrawn and never-graded candidates are not seatable; neither is a
- * candidate whose median is below Good — the minimum median is a FLOOR, not a tie-break
- * input. The rest rank by median, then by the majority gauge: p > q outranks p == q outranks
- * p < q; higher p wins inside p > q; LOWER q wins inside p < q. A residual tie — same
- * median, same p, same q — is NOT broken by candidate index: if such a group straddles the
- * seat boundary, seating STOPS there and the group is referred. Index decides where a
- * candidate sits, never whether.
+ * candidate whose qualifying grade is below Good — the Minimum Qualifying Grade is a FLOOR,
+ * not a tie-break input. The rest rank by qualifying grade, then by the majority gauge: p > q
+ * outranks p == q outranks p < q; higher p wins inside p > q; LOWER q wins inside p < q. A
+ * residual tie — same qualifying grade, same p, same q — is NOT broken by candidate index: if
+ * such a group straddles the seat boundary, seating STOPS there and the group is referred.
+ * Index decides where a candidate sits, never whether.
  */
 export function allocateSeatsMajorityJudgment(
   ballots: Ballot[],
@@ -240,25 +248,25 @@ export function allocateSeatsMajorityJudgment(
 
   const candidates: MjCandidate[] = byGrade.map((grades, candidateIndex) => {
     const cast = grades.reduce((acc, w) => acc.add(w), Dec.ZERO);
-    const median = medianGrade(grades, cast);
+    const qualifying = qualifyingGrade(grades, cast);
     let above = Dec.ZERO;
     let below = Dec.ZERO;
-    if (median !== null) {
-      above = grades.slice(0, median).reduce((acc, w) => acc.add(w), Dec.ZERO);
-      below = grades.slice(median + 1).reduce((acc, w) => acc.add(w), Dec.ZERO);
+    if (qualifying !== null) {
+      above = grades.slice(0, qualifying).reduce((acc, w) => acc.add(w), Dec.ZERO);
+      below = grades.slice(qualifying + 1).reduce((acc, w) => acc.add(w), Dec.ZERO);
     }
-    return { candidateIndex, byGrade: grades, cast, median, above, below };
+    return { candidateIndex, byGrade: grades, cast, qualifying, above, below };
   });
 
   // The gauge's sign as an ordering key: 0 = p > q (best), 1 = p == q, 2 = p < q.
   const gaugeClass = (c: MjCandidate): number => c.above.gt(c.below) ? 0 : c.above.eq(c.below) ? 1 : 2;
 
   const ranked = candidates.filter(
-    (c) => !excluded.includes(c.candidateIndex) && c.median !== null && c.median <= MINIMUM_MEDIAN_GRADE,
+    (c) => !excluded.includes(c.candidateIndex) && c.qualifying !== null && c.qualifying <= MINIMUM_QUALIFYING_GRADE,
   );
   ranked.sort((a, b) => {
-    const byMedian = (a.median as number) - (b.median as number);
-    if (byMedian !== 0) return byMedian;
+    const byQualifying = (a.qualifying as number) - (b.qualifying as number);
+    if (byQualifying !== 0) return byQualifying;
     const byClass = gaugeClass(a) - gaugeClass(b);
     if (byClass !== 0) return byClass;
     // Within p > q a higher p wins; within p < q a lower q wins. The p == q class has no
@@ -270,7 +278,7 @@ export function allocateSeatsMajorityJudgment(
   });
 
   const indistinguishable = (a: MjCandidate, b: MjCandidate): boolean =>
-    a.median === b.median && a.above.eq(b.above) && a.below.eq(b.below);
+    a.qualifying === b.qualifying && a.above.eq(b.above) && a.below.eq(b.below);
 
   const winners: number[] = [];
   const referred: number[] = [];
@@ -295,16 +303,17 @@ export function allocateSeatsMajorityJudgment(
   return { candidates, winners, referredTieUnresolved: referred, invalidBallots };
 }
 
-/** The recomputed `majority_judgment` object, in the exact shape the document carries. */
+/** The recomputed `majority_judgment` object, in the exact shape the document carries (v14
+ * field names: `qualifying_grade` per candidate, `minimum_qualifying_grade` at the block). */
 function majorityJudgmentJson(r: MjResult): Json {
   return {
     grades: [...GRADES],
-    minimum_median_grade: GRADES[MINIMUM_MEDIAN_GRADE] as string,
+    minimum_qualifying_grade: GRADES[MINIMUM_QUALIFYING_GRADE] as string,
     candidates: r.candidates.map((c) => ({
       candidate_index: c.candidateIndex,
       by_grade: c.byGrade.map((w) => w.toString()),
       cast: c.cast.toString(),
-      median: c.median,
+      qualifying_grade: c.qualifying,
       above: c.above.toString(),
       below: c.below.toString(),
     })),

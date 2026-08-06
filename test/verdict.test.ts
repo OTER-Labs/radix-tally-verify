@@ -1,8 +1,14 @@
 /**
  * Verdict re-derivation. These are the reference engine's own test cases restated against
- * this implementation — the two agreeing on the awkward cases (exact-half medians, residual
- * ties at the seat boundary, a withdrawn front-runner) is what makes the re-derivation worth
- * trusting. No Gateway anywhere: ballots and weights come in as values.
+ * this implementation — the two agreeing on the awkward cases (exact-quantile qualifying
+ * grades, residual ties at the seat boundary, a withdrawn front-runner) is what makes the
+ * re-derivation worth trusting. No Gateway anywhere: ballots and weights come in as values.
+ *
+ * Majority Judgment settles at the Grade Quantile of THREE-FIFTHS of the weight cast, not the
+ * median — the framework moved off the median on 2026-08-05 (Shadaffy/radix-dao-governance
+ * b98269e). "MJ seam" below pins the one case where that matters: a top grade holding between
+ * one half and three-fifths of the weight settled there under the old median and settles one
+ * grade lower under three-fifths.
  */
 
 import { strict as assert } from "node:assert";
@@ -89,36 +95,59 @@ test("zero-weight ballots cannot elect", () => {
   assert.deepEqual(allocateSeatsSpav([ballot(0, [0, 1])], 2, 2, NONE), []);
 });
 
-test("MJ: the median is the highest grade reaching half the cast weight", () => {
+test("MJ: the qualifying grade is the highest grade reaching three-fifths of the cast weight", () => {
   let r = allocateSeatsMajorityJudgment([mj(60, [0]), mj(40, [4])], 1, 1, NONE);
-  assert.equal(r.candidates[0]?.median, 0, "60% Excellent carries the median");
+  assert.equal(r.candidates[0]?.qualifying, 0, "60% Excellent reaches the three-fifths quantile exactly");
   r = allocateSeatsMajorityJudgment([mj(40, [0]), mj(60, [4])], 1, 1, NONE);
-  assert.equal(r.candidates[0]?.median, 4, "40% Excellent does not reach half");
+  assert.equal(r.candidates[0]?.qualifying, 4, "40% Excellent does not reach three-fifths");
 });
 
-test("MJ: an exact half resolves upward", () => {
-  const r = allocateSeatsMajorityJudgment([mj(50, [1]), mj(50, [3])], 1, 1, NONE);
-  assert.equal(r.candidates[0]?.median, 1, "the even split takes Very Good, not Acceptable");
+test("MJ: exactly the Grade Quantile resolves upward", () => {
+  const r = allocateSeatsMajorityJudgment([mj(60, [1]), mj(40, [3])], 1, 1, NONE);
+  assert.equal(
+    r.candidates[0]?.qualifying,
+    1,
+    "60 of 100 is exactly three-fifths; it takes Very Good, not Acceptable — the comparison " +
+      "never divides, so landing exactly on the quantile resolves upward exactly",
+  );
 });
 
-test("MJ: a median below Good is not seatable and the seat stays empty", () => {
+test("MJ seam: between one-half and three-fifths settles one grade lower under the Grade " +
+  "Quantile than it would have under the old median", () => {
+  // 55% of the weight cast graded this candidate Very Good, the rest Good. Under the median
+  // (threshold 50%) 55 >= 50 qualifies at Very Good. Under three-fifths (threshold 60%) 55 < 60,
+  // so accumulation continues to the next grade, where all 100% crosses — Good, one full grade
+  // lower, off the exact same ballots. This is the entire behavioural difference the 2026-08-05
+  // framework change makes.
+  const r = allocateSeatsMajorityJudgment([mj(55, [1]), mj(45, [2])], 1, 1, NONE);
+  assert.equal(
+    r.candidates[0]?.qualifying,
+    2,
+    "three-fifths of 100 is 60; 55 does not reach it (the old median's 50 threshold would have), " +
+      "so the qualifying grade falls to Good instead of Very Good",
+  );
+});
+
+test("MJ: a qualifying grade below Good is not seatable and the seat stays empty", () => {
   const r = allocateSeatsMajorityJudgment([mj(100, [3, 2])], 2, 2, NONE);
-  assert.equal(r.candidates[0]?.median, 3);
-  assert.equal(r.candidates[1]?.median, 2);
+  assert.equal(r.candidates[0]?.qualifying, 3);
+  assert.equal(r.candidates[1]?.qualifying, 2);
   assert.deepEqual(r.winners, [1], "only the candidate at or above Good is seated");
 });
 
 test("MJ: the gauge orders by sign before magnitude", () => {
   const ballots = [mj(30, [0, 0, 2]), mj(40, [2, 2, 2]), mj(30, [2, 4, 4])];
   const r = allocateSeatsMajorityJudgment(ballots, 3, 3, NONE);
-  for (const c of r.candidates) assert.equal(c.median, 2);
+  for (const c of r.candidates) assert.equal(c.qualifying, 2);
   assert.deepEqual(r.winners, [0, 1, 2], "p>q, then p==q, then p<q");
 });
 
 test("MJ: within a gauge class p descends and q ascends", () => {
   let r = allocateSeatsMajorityJudgment([mj(20, [0, 0]), mj(20, [0, 2]), mj(60, [2, 2])], 2, 2, NONE);
   assert.deepEqual(r.winners, [0, 1], "higher p wins inside p>q");
-  r = allocateSeatsMajorityJudgment([mj(50, [2, 2]), mj(30, [4, 2]), mj(20, [4, 4])], 2, 2, NONE);
+  // Both candidates qualify at Good with 60/80 of 100 (>= three-fifths); candidate 1's below-Good
+  // weight (q=20) is lower than candidate 0's (q=40), so it ranks first within the p<q class.
+  r = allocateSeatsMajorityJudgment([mj(60, [2, 2]), mj(20, [4, 2]), mj(20, [4, 4])], 2, 2, NONE);
   assert.deepEqual(r.winners, [1, 0], "lower q wins inside p<q");
 });
 
@@ -150,7 +179,7 @@ test("MJ: a withdrawn candidate is excluded from seating but still reported", ()
   assert.deepEqual(allocateSeatsMajorityJudgment(ballots, 3, 2, NONE).winners, [0, 1], "control");
   const r = allocateSeatsMajorityJudgment(ballots, 3, 2, [0]);
   assert.deepEqual(r.winners, [1, 2], "the seat passes to the next candidate standing");
-  assert.equal(r.candidates[0]?.median, 0, "the grades remain a fact about the electorate");
+  assert.equal(r.candidates[0]?.qualifying, 0, "the grades remain a fact about the electorate");
 });
 
 test("an abstention counts toward quorum and toward no option", () => {

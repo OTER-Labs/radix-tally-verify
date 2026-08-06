@@ -19,7 +19,7 @@ import { ACCOUNT_A, ACCOUNT_B, XRD, scenarioGateway } from "./fake-gateway.ts";
  * B weighs 52, both approve. quorum 100 with a 2-voter floor, threshold 50, MAS 10. */
 function goodDocument(): Record<string, Json> {
   return {
-    tally_doc_version: 13,
+    tally_doc_version: 14,
     consultation_id: "consultation:test",
     title: "Should the fixture pass?",
     kind: "Binding",
