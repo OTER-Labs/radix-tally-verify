@@ -151,6 +151,7 @@ export async function verifyTallyDocument(
         minUniqueVoters: doc.minUniqueVoters,
         excluded: doc.withdrawnExcluded ?? [],
         excludedAccounts: doc.excludedAccounts,
+        gradeQuantile: doc.gradeQuantile,
       },
       doc.votes,
       weights,

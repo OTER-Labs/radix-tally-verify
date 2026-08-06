@@ -8,10 +8,16 @@
  * verifier that hardcoded a rule would be checking its own assumptions, not the document.
  *
  * The arithmetic is scrypto Decimal throughout (src/decimal.ts), truncating division and all:
- * SPAV divides by an integer round count, and Majority Judgment's qualifying grade — the
- * Grade Quantile of THREE-FIFTHS of the weight cast, not the median (the framework moved off
- * the median on 2026-08-05) — resolves exactly on the boundary only because the comparison is
- * a cross-multiplication, never a division.
+ * SPAV divides by an integer round count, and Majority Judgment's qualifying grade resolves
+ * exactly on the boundary only because the comparison is a cross-multiplication, never a
+ * division.
+ *
+ * The Grade Quantile that qualifying grade settles at is itself taken from the document — the
+ * `majority_judgment.grade_quantile` fraction it publishes — and not from a constant here. A
+ * stored result must be recomputable under the rule that PRODUCED it rather than under whatever
+ * rule is current (Proposal & Voting Framework §6.5), and this engine has already moved the
+ * quantile once (the median through to three-fifths, 2026-08-05). A verifier hardcoding today's
+ * value would call every document written under yesterday's a lie.
  */
 
 import { Dec } from "./decimal.ts";
@@ -26,6 +32,32 @@ export const GRADES = ["Excellent", "Very Good", "Good", "Acceptable", "Poor"] a
  * comparison is `qualifying <= MINIMUM_QUALIFYING_GRADE` — lower ordinal is better. Unchanged
  * by the 2026-08-05 median -> three-fifths move: the floor is a grade, not a quantile. */
 export const MINIMUM_QUALIFYING_GRADE = 2;
+
+/**
+ * The Grade Quantile a candidate's qualifying grade settles at, as an EXACT fraction.
+ *
+ * A numerator and a denominator, never a decimal: three-fifths is exact and 0.6 in binary
+ * floating point is not, and the comparison the quantile describes
+ * (`atOrAbove * denominator >= cast * numerator`) is one a challenger must reproduce without
+ * ever dividing.
+ */
+export interface GradeQuantile {
+  numerator: number;
+  denominator: number;
+}
+
+/**
+ * Three-fifths — the quantile the framework set on 2026-08-05
+ * (Shadaffy/radix-dao-governance b98269e, which moved off the median and renamed "median grade"
+ * to "qualifying grade").
+ *
+ * This is a FALLBACK, not the rule. Every document that publishes
+ * `majority_judgment.grade_quantile` is recomputed under its own published fraction; this value
+ * is used only for a document written before the field existed (v14 and earlier), where
+ * three-fifths is what the engine of that vintage applied. It is deliberately not consulted
+ * anywhere a published fraction is available.
+ */
+export const THREE_FIFTHS: GradeQuantile = { numerator: 3, denominator: 5 };
 
 export interface Ballot {
   weight: Dec;
@@ -68,6 +100,21 @@ export interface VerdictSpec {
    * vote; it does not change how quorum is measured").
    */
   excludedAccounts: string[];
+  /**
+   * The Grade Quantile the document publishes in `majority_judgment.grade_quantile` — the
+   * fraction THIS result was settled at, which is the fraction it must be recomputed at.
+   *
+   * `null` means the document does not publish one, which is every document before v15. Those
+   * fall back to {@link THREE_FIFTHS}, the quantile the engine of that vintage applied, and the
+   * recomputed `majority_judgment` omits the field in turn so a v14 document still compares
+   * equal to itself.
+   *
+   * An absent field is therefore not a loophole: it does not let a publisher apply a quantile of
+   * their choosing unannounced, it pins them to three-fifths. A tally settled at anything else
+   * and published without saying so recomputes to different grades and reports as a figure
+   * difference.
+   */
+  gradeQuantile: GradeQuantile | null;
 }
 
 export interface MjCandidate {
@@ -131,8 +178,16 @@ export function bindingApproved(
 }
 
 /**
- * Plurality: seat the highest approval totals, top N. What the Radix Network DAO Charter
- * specifies for RAC elections. Ties break toward the lowest candidate index — arbitrary, but
+ * Plurality: seat the highest approval totals, top N.
+ *
+ * This is the PLATFORM's current default and NOT a mechanism the DAO framework contains — the
+ * word does not appear anywhere in it, and its default is Majority Judgment (Proposal & Voting
+ * Framework §4.5). An earlier revision of the reference engine's published weight rule claimed
+ * the Radix Network DAO Charter specifies plurality; that claim was false and was withdrawn
+ * explicitly in the same version bump as this document revision, so it is withdrawn here too
+ * rather than quietly reworded.
+ *
+ * Ties break toward the lowest candidate index — arbitrary, but
  * fixed and stated, which is the only thing a tie rule has to be — and a candidate with no
  * approval weight is never seated: an empty seat states something true, a seat filled at
  * zero support does not.
@@ -217,18 +272,24 @@ function decodeMjBallot(selection: number[], candidateCount: number): number[] |
  * Qualifying grade: the highest grade at which the weight grading the candidate at or above
  * that grade reaches the Grade Quantile of the weight cast for them.
  *
- * The Grade Quantile is THREE-FIFTHS, not the median — the framework moved off the median on
- * 2026-08-05 (Shadaffy/radix-dao-governance b98269e), which also renamed "median grade" to
- * "qualifying grade". Compared as `atOrAbove * 5 >= cast * 3` rather than against
- * `cast.mul(3).div(5)`, so a candidate sitting exactly on the quantile resolves upward exactly,
- * rather than by whichever way truncating fixed-point division happened to fall.
+ * The quantile is the caller's — the fraction the document published — not a constant here. It
+ * has already moved once (the median through to three-fifths on 2026-08-05,
+ * Shadaffy/radix-dao-governance b98269e), which is exactly why a stored result carries the one
+ * it was settled at.
+ *
+ * Compared as `atOrAbove * denominator >= cast * numerator` rather than against
+ * `cast.mul(numerator).div(denominator)`, so a candidate sitting exactly on the quantile
+ * resolves upward exactly, rather than by whichever way truncating fixed-point division happened
+ * to fall.
  */
-function qualifyingGrade(byGrade: Dec[], cast: Dec): number | null {
+function qualifyingGrade(byGrade: Dec[], cast: Dec, quantile: GradeQuantile): number | null {
   if (!cast.isPositive()) return null;
+  const numerator = Dec.fromInt(quantile.numerator);
+  const denominator = Dec.fromInt(quantile.denominator);
   let atOrAbove = Dec.ZERO;
   for (let ordinal = 0; ordinal < byGrade.length; ordinal++) {
     atOrAbove = atOrAbove.add(byGrade[ordinal] as Dec);
-    if (atOrAbove.mul(Dec.fromInt(5)).gte(cast.mul(Dec.fromInt(3)))) return ordinal;
+    if (atOrAbove.mul(denominator).gte(cast.mul(numerator))) return ordinal;
   }
   // Unreachable while cast is the sum of byGrade, but a fallback beats a crash in a tally a
   // challenger is entitled to run on inputs nobody chose.
@@ -246,12 +307,17 @@ function qualifyingGrade(byGrade: Dec[], cast: Dec): number | null {
  * residual tie — same qualifying grade, same p, same q — is NOT broken by candidate index: if
  * such a group straddles the seat boundary, seating STOPS there and the group is referred.
  * Index decides where a candidate sits, never whether.
+ *
+ * `quantile` is the Grade Quantile to settle at — the document's own published fraction. It
+ * defaults to three-fifths only for a caller that has no document to ask (the unit tests, and
+ * any document predating the field).
  */
 export function allocateSeatsMajorityJudgment(
   ballots: Ballot[],
   candidateCount: number,
   seats: number,
   excluded: number[],
+  quantile: GradeQuantile = THREE_FIFTHS,
 ): MjResult {
   const byGrade: Dec[][] = [];
   for (let c = 0; c < candidateCount; c++) byGrade.push(new Array<Dec>(GRADES.length).fill(Dec.ZERO));
@@ -271,7 +337,7 @@ export function allocateSeatsMajorityJudgment(
 
   const candidates: MjCandidate[] = byGrade.map((grades, candidateIndex) => {
     const cast = grades.reduce((acc, w) => acc.add(w), Dec.ZERO);
-    const qualifying = qualifyingGrade(grades, cast);
+    const qualifying = qualifyingGrade(grades, cast, quantile);
     let above = Dec.ZERO;
     let below = Dec.ZERO;
     if (qualifying !== null) {
@@ -326,12 +392,28 @@ export function allocateSeatsMajorityJudgment(
   return { candidates, winners, referredTieUnresolved: referred, invalidBallots };
 }
 
-/** The recomputed `majority_judgment` object, in the exact shape the document carries (v14
- * field names: `qualifying_grade` per candidate, `minimum_qualifying_grade` at the block). */
-function majorityJudgmentJson(r: MjResult): Json {
+/**
+ * The recomputed `majority_judgment` object, in the exact shape the document carries
+ * (`qualifying_grade` per candidate, `minimum_qualifying_grade` at the block, and from v15 the
+ * `grade_quantile` fraction the result was settled at).
+ *
+ * `published` is echoed back exactly as the document stated it, and OMITTED when the document
+ * stated none. The block is compared structurally, so emitting a field a v14 document does not
+ * carry would report every pre-v15 election as a figure difference — the field is absent there
+ * because the engine of that vintage did not write it, not because anything disagrees.
+ */
+function majorityJudgmentJson(r: MjResult, published: GradeQuantile | null): Json {
   return {
     grades: [...GRADES],
     minimum_qualifying_grade: GRADES[MINIMUM_QUALIFYING_GRADE] as string,
+    ...(published === null
+      ? {}
+      : {
+          grade_quantile: {
+            numerator: published.numerator,
+            denominator: published.denominator,
+          },
+        }),
     candidates: r.candidates.map((c) => ({
       candidate_index: c.candidateIndex,
       by_grade: c.byGrade.map((w) => w.toString()),
@@ -359,6 +441,19 @@ function majorityJudgmentJson(r: MjResult): Json {
  * abstains from nothing — it is not a participant), no voter, no grade, no `cast`. The single
  * `continue` below is the entire rule, and it is written once precisely so no aggregate can be
  * added later that quietly forgets it.
+ *
+ * Or unless, under Majority Judgment, the ballot is INVALID — one that does not grade every
+ * candidate exactly once. Participation is the total power of VALID ballots only (On-Chain
+ * Identifiers & Verification Policy §4; Proposal & Voting Framework §6.3), so an invalid ballot
+ * reaches no option total, no `total_weight` and no `voter_count` either, and therefore cannot
+ * carry an election over quorum without expressing a single grade. It does still reach the
+ * allocator, because the allocator is what REPORTS it in `invalid_ballots` — that is the whole
+ * difference between the two exclusions, and why they are two `continue`s and not one.
+ *
+ * The two compose in one direction only. A barred ballot is struck first and never reaches the
+ * validity check, so it can never be reported invalid: it was not eligible to be judged, and
+ * naming it in `invalid_ballots` would accuse a voter of malformity on a ballot that was never
+ * read.
  */
 export function deriveFigures(
   spec: VerdictSpec,
@@ -385,19 +480,25 @@ export function deriveFigures(
       continue;
     }
     voteExcluded.push(false);
-    voterCount++;
     const weight = weights.get(vote.account) ?? Dec.ZERO;
+    // In the ballot list even when invalid: the allocator has to SEE an invalid ballot to report
+    // it. `ballotIndex` keeps the report naming positions in the document's `votes`, which the
+    // barred ballots above have already made non-consecutive.
+    const selection = vote.selection.filter((x) => x >= 0 && x < optionCount);
+    ballots.push({ weight, selection, ballotIndex: i });
+
+    // Validity is decided by `decodeMjBallot`, the same oracle the allocator uses, over the same
+    // out-of-range filter it applies. A second copy of the rule here would be free to drift, and
+    // would then disagree with the `invalid_ballots` list in the very same document.
+    if (useMj && decodeMjBallot(selection, candidateCount) === null) continue;
+
+    voterCount++;
     totalWeight = totalWeight.add(weight);
     if (vote.selection.length === 0) abstainWeight = abstainWeight.add(weight);
     for (const idx of vote.selection) {
       const t = totals[idx];
       if (t !== undefined) totals[idx] = t.add(weight);
     }
-    ballots.push({
-      weight,
-      selection: vote.selection.filter((i) => i >= 0 && i < optionCount),
-      ballotIndex: i,
-    });
   }
 
   // Quorum has two legs: enough weight, and (when a floor is set) enough distinct voters. One
@@ -424,16 +525,26 @@ export function deriveFigures(
     : null;
 
   // Missing quorum means no winners, not "the winners, but ignore them" — a reader who sees
-  // a filled seat list will act on it. Plurality is the fallback when an election names no
-  // rule: it is what the charter specifies, so an absent rule falls to the conformant one.
+  // a filled seat list will act on it. Plurality is the fallback when an election names no rule,
+  // because it is what the reference engine falls back to and this verifier's job is to
+  // reproduce that engine's answer — not because the framework endorses it. It does not: the
+  // framework's default is Majority Judgment.
   const election = spec.kind === "Election" && spec.seats > 0;
   let winners: number[] | null = null;
   let majorityJudgment: Json = null;
   if (election && quorumMet) {
     if (useMj) {
-      const mj = allocateSeatsMajorityJudgment(ballots, candidateCount, spec.seats, spec.excluded);
+      const mj = allocateSeatsMajorityJudgment(
+        ballots,
+        candidateCount,
+        spec.seats,
+        spec.excluded,
+        // The document's own fraction, or three-fifths when it publishes none. Never a constant
+        // chosen here over one the document states.
+        spec.gradeQuantile ?? THREE_FIFTHS,
+      );
       winners = mj.winners;
-      majorityJudgment = majorityJudgmentJson(mj);
+      majorityJudgment = majorityJudgmentJson(mj, spec.gradeQuantile);
     } else if (spec.seatRule === "Spav") {
       winners = allocateSeatsSpav(ballots, candidateCount, spec.seats, spec.excluded);
     } else {

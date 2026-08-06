@@ -37,7 +37,8 @@ this tool:
    document's own source register says counts.
 2. **Re-derives the verdict** by applying the document's stated rules to those weights — including
    the DAO-controlled-funds bar, which strikes ballots cast from accounts the document's
-   `excluded_accounts` register names.
+   `excluded_accounts` register names, and the Grade Quantile the document publishes, which
+   decides where a Majority Judgment candidate's grade settles.
 3. **Re-serializes and re-hashes** the result, and compares against the `tally_hash` committed
    on-ledger.
 
@@ -67,8 +68,9 @@ noise:
   carries. Pool units held *by* a pool are not followed (one level), and non-fungible liquidity
   positions are not counted — both deliberate, both inherited from the reference rule.
 - **`src/verdict.ts`** — quorum (both legs), the Binding gates (strict decisive ratio, MAS
-  floor), the DAO-controlled-funds bar, and the three seat rules (Plurality, SPAV, Majority
-  Judgment) applied from the document's own stated parameters.
+  floor), the DAO-controlled-funds bar, the valid-ballots-only Participation rule, and the three
+  seat rules (Plurality, SPAV, Majority Judgment) applied from the document's own stated
+  parameters, down to the Grade Quantile it publishes.
 - **`src/verify.ts` / `src/cli.ts`** — orchestration and the command line.
 - **`test/`** — cross-implementation agreement, plus weight and verdict logic against fixture
   Gateway responses. No test touches the network.
@@ -112,6 +114,48 @@ wrong figure.
 **Version 14 documents keep verifying.** An absent register is `[]` and an absent flag is `false`,
 so a document written before the bar existed takes the same path it always did and hashes to the
 same bytes.
+
+## The Grade Quantile is the document's, not the verifier's
+
+A Majority Judgment candidate's **qualifying grade** is the highest grade whose at-or-above weight
+reaches the *Grade Quantile* of the weight cast for them. That quantile is **three-fifths** today.
+It was the median until 2026-08-05.
+
+So a stored result recomputed under today's quantile is not necessarily recomputable at all — it
+was settled under a different rule, and a verifier that hardcoded the current one would report
+every correct historical election as a lie. The framework's answer (Proposal & Voting Framework
+§6.5) is that every result states the fraction it was settled at, and version 15 publishes it:
+
+```json
+"majority_judgment": { "grade_quantile": { "numerator": 3, "denominator": 5 }, … }
+```
+
+This verifier recomputes each document's grades **under that document's own fraction**. A document
+publishing one-half settles its candidates at one-half, and a verifier applying three-fifths to it
+would be checking its own assumptions rather than the document. An absent field — every v14
+document — means three-fifths, which is what the engine of that vintage applied; absence is not a
+licence to have applied something unannounced, it pins the recomputation to three-fifths and a
+tally settled at anything else reports as a figure difference.
+
+It is an exact **fraction**, never a decimal, and one written as a decimal is refused as malformed.
+0.6 has no exact binary representation, and the comparison the quantile describes —
+`at_or_above * denominator >= cast * numerator` — is one a challenger must reproduce without ever
+dividing. Landing exactly on the quantile resolves upward, exactly, for the same reason.
+
+## An invalid Majority Judgment ballot is not Participation
+
+Under MJ a ballot grades **every** candidate exactly once. One that does not is *invalid*, not
+partial — and from version 15 its weight reaches nothing at all: no option total, no
+`total_weight`, no `abstain_weight`, no `voter_count`, no grade, no candidate's `cast`.
+Participation is the total power of valid ballots only (On-Chain Identifiers & Verification Policy
+§4; Proposal & Voting Framework §6.3). Before this, a malformed ballot's weight counted toward
+`total_weight` and could therefore carry an election over its quorum without expressing a single
+grade.
+
+It is still **reported**, by index, in `majority_judgment.invalid_ballots` — which is the whole
+difference between an invalid ballot and a barred one. A barred ballot is struck first and never
+reaches the validity check, so it is never named there: it was not eligible to be judged, and an
+index in that list must not accuse a voter of malformity on a ballot nobody read.
 
 ## Running it
 

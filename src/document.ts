@@ -14,17 +14,27 @@ import { Dec } from "./decimal.ts";
 import type { Json } from "./canonical.ts";
 import { asArray, asObject, asString } from "./gateway.ts";
 import { GRADES } from "./verdict.ts";
+import type { GradeQuantile } from "./verdict.ts";
 import type { WeightSources } from "./weights.ts";
 
 /**
  * The document version this verifier is written against.
  *
- * 15 added the DAO-controlled-funds bar (framework 47ceb27, charter §5): the top-level
- * `excluded_accounts` register and the per-ballot `excluded` flag. Nothing here GATES on the
- * number — verification is driven by field presence, so a v14 document (no register, no flags)
- * takes the absent-means-empty path and verifies byte-identically to how it did before v15
- * existed. The constant is here to state which revision the field set below tracks, not to
- * refuse the previous one.
+ * 15 carries four changes, batched into one bump because a version bump moves every document's
+ * hash and each of them would otherwise pay its own rollout:
+ *
+ *   - the DAO-controlled-funds bar (framework 47ceb27, charter §5): the top-level
+ *     `excluded_accounts` register and the per-ballot `excluded` flag;
+ *   - `majority_judgment.grade_quantile`, the exact fraction each MJ result was settled at;
+ *   - invalid MJ ballots no longer counting toward Participation;
+ *   - a corrected weight rule, which this verifier neither stores nor compares (it is hashed
+ *     with the rest of the document, and reproducing a multi-kilobyte English string here would
+ *     add a second place for it to be wrong).
+ *
+ * Nothing here GATES on the number — verification is driven by field presence, so a v14 document
+ * (no register, no flags, no published quantile) takes the absent-means-default path on each and
+ * verifies byte-identically to how it did before v15 existed. The constant is here to state
+ * which revision the field set below tracks, not to refuse the previous one.
  */
 export const TALLY_DOC_VERSION = 15;
 
@@ -79,6 +89,17 @@ export interface TallyDocument {
   seats: number;
   seatRule: string | null;
   majorityJudgment: Json;
+  /**
+   * The Grade Quantile the document publishes in `majority_judgment.grade_quantile` — the exact
+   * fraction its qualifying grades were settled at.
+   *
+   * Not a claim to be checked against something else, the way `weight` and `excluded` are: it is
+   * an INPUT to the recomputation. Framework §6.5 requires it on every MJ result precisely so a
+   * stored result stays recomputable under the rule that produced it, and a verifier that
+   * recomputed a v14 election under today's quantile would report a correct historical tally as
+   * a lie. `null` when the document publishes none — see `VerdictSpec.gradeQuantile`.
+   */
+  gradeQuantile: GradeQuantile | null;
   winners: number[] | null;
   withdrawnExcluded: number[] | null;
   approveWeight: Dec | null;
@@ -220,6 +241,50 @@ function parseExcludedAccounts(raw: unknown): string[] {
 }
 
 /**
+ * The Grade Quantile published inside `majority_judgment`, as an exact fraction.
+ *
+ * Absent is `null` and not an error: the field arrived in v15, and refusing every document
+ * written before it would make this verifier unable to check the tallies it was written to
+ * check. Absent means three-fifths, which is what the engine of that vintage applied.
+ *
+ * Present, it must be two integers. A decimal is refused outright rather than read as a
+ * near-enough approximation — the entire reason the framework specifies a numerator and a
+ * denominator is that 0.6 has no exact binary representation, and a verifier willing to accept
+ * `0.6` here would be willing to disagree with the ledger in the last place. A denominator of
+ * zero is refused for the same reason: it is not a fraction, and a comparison against it is not
+ * the comparison the rule describes.
+ *
+ * A numerator greater than the denominator is NOT refused. It is a quantile no candidate can
+ * reach, which settles every one of them at the lowest grade — strange, but well defined, and
+ * this verifier's job is to reproduce the document's stated rule rather than to hold opinions
+ * about which fractions the framework ought to have allowed.
+ */
+function parseGradeQuantile(mjRaw: unknown): GradeQuantile | null {
+  if (typeof mjRaw !== "object" || mjRaw === null || Array.isArray(mjRaw)) return null;
+  const q = (mjRaw as Record<string, unknown>)["grade_quantile"];
+  if (q === null || q === undefined) return null;
+  if (typeof q !== "object" || Array.isArray(q)) {
+    fail("majority_judgment.grade_quantile", "is neither absent nor an object");
+  }
+  const o = q as Record<string, unknown>;
+  const num = o["numerator"];
+  const den = o["denominator"];
+  if (typeof num !== "number" || !Number.isSafeInteger(num) || num < 0) {
+    fail(
+      "majority_judgment.grade_quantile.numerator",
+      "is missing or not a non-negative integer — the quantile is an exact fraction, never a decimal",
+    );
+  }
+  if (typeof den !== "number" || !Number.isSafeInteger(den) || den <= 0) {
+    fail(
+      "majority_judgment.grade_quantile.denominator",
+      "is missing or not a positive integer — the quantile is an exact fraction, never a decimal",
+    );
+  }
+  return { numerator: num, denominator: den };
+}
+
+/**
  * Parse and validate a tally document. Accepts either the bare document or the API envelope
  * (`{"document": …, "document_hash_blake2b": …}`); the envelope's hash is returned alongside
  * so the caller does not have to re-implement the unwrapping.
@@ -307,6 +372,7 @@ export function parseTallyDocument(input: unknown): { doc: TallyDocument; envelo
     seats: reqInt(raw, "seats"),
     seatRule,
     majorityJudgment: (raw["majority_judgment"] ?? null) as Json,
+    gradeQuantile: parseGradeQuantile(raw["majority_judgment"]),
     winners,
     withdrawnExcluded: optIntArray(raw["withdrawn_excluded"], "withdrawn_excluded"),
     approveWeight: optDec(raw, "approve_weight"),

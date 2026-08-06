@@ -17,13 +17,14 @@ import { test } from "node:test";
 import { Dec } from "../src/decimal.ts";
 import {
   GRADES,
+  THREE_FIFTHS,
   allocateSeatsMajorityJudgment,
   allocateSeatsPlurality,
   allocateSeatsSpav,
   bindingApproved,
   deriveFigures,
 } from "../src/verdict.ts";
-import type { Ballot, DerivedFigures, VerdictSpec } from "../src/verdict.ts";
+import type { Ballot, DerivedFigures, GradeQuantile, VerdictSpec } from "../src/verdict.ts";
 
 const d = (v: number): Dec => Dec.fromInt(BigInt(v));
 const NONE: number[] = [];
@@ -194,6 +195,7 @@ test("an abstention counts toward quorum and toward no option", () => {
     minUniqueVoters: 0,
     excluded: [],
     excludedAccounts: [],
+    gradeQuantile: null,
   };
   const votes = [
     { account: "a", selection: [] }, // abstains — carries the consultation over quorum
@@ -222,6 +224,7 @@ test("quorum has two legs and both must hold", () => {
     minUniqueVoters: 3,
     excluded: [],
     excludedAccounts: [],
+    gradeQuantile: null,
   };
   const votes = [
     { account: "a", selection: [0] },
@@ -260,6 +263,7 @@ function bindingSpec(over: Partial<VerdictSpec> = {}): VerdictSpec {
     minUniqueVoters: 1,
     excluded: [],
     excludedAccounts: [],
+    gradeQuantile: null,
     ...over,
   };
 }
@@ -360,14 +364,14 @@ test("a barred EMPTY selection is not an abstention: it abstains from nothing", 
 });
 
 /** The recomputed `majority_judgment` block, typed enough to assert against. */
-function mjBlock(f: DerivedFigures): {
+interface MjBlock {
   candidates: Array<{ by_grade: string[]; cast: string; qualifying_grade: number | null }>;
   invalid_ballots: number[];
-} {
-  return f.majorityJudgment as unknown as {
-    candidates: Array<{ by_grade: string[]; cast: string; qualifying_grade: number | null }>;
-    invalid_ballots: number[];
-  };
+  grade_quantile?: GradeQuantile;
+}
+
+function mjBlock(f: DerivedFigures): MjBlock {
+  return f.majorityJudgment as unknown as MjBlock;
 }
 
 const mjSpec = (candidates: number, over: Partial<VerdictSpec> = {}): VerdictSpec => ({
@@ -381,6 +385,7 @@ const mjSpec = (candidates: number, over: Partial<VerdictSpec> = {}): VerdictSpe
   minUniqueVoters: 0,
   excluded: [],
   excludedAccounts: [],
+  gradeQuantile: null,
   ...over,
 });
 
@@ -437,6 +442,218 @@ test("MJ: invalid_ballots keeps indexing the document's votes, not the surviving
   );
 });
 
+/* ------------------------------------------------------------------------------------------
+ * The published Grade Quantile (v15, Proposal & Voting Framework §6.5).
+ *
+ * Every MJ result now states the exact fraction it was settled at, and the recomputation uses
+ * THAT fraction rather than whatever this verifier believes today. The point of the field is
+ * that a stored result stays recomputable under the rule that produced it: this engine has
+ * already moved the quantile once (median -> three-fifths, 2026-08-05), and a verifier
+ * hardcoding the current value would call every document written under the old one a lie.
+ * ---------------------------------------------------------------------------------------- */
+
+const ONE_HALF: GradeQuantile = { numerator: 1, denominator: 2 };
+
+test("MJ: the qualifying grade settles at the quantile it is given, not at a hardcoded one", () => {
+  // The seam ballots: 55% of the weight cast grades this candidate Very Good, 45% Good.
+  const ballots = [mj(55, [1]), mj(45, [2])];
+  assert.equal(
+    allocateSeatsMajorityJudgment(ballots, 1, 1, NONE, THREE_FIFTHS).candidates[0]?.qualifying,
+    2,
+    "three-fifths of 100 is 60; 55 does not reach it, so the grade falls to Good",
+  );
+  assert.equal(
+    allocateSeatsMajorityJudgment(ballots, 1, 1, NONE, ONE_HALF).candidates[0]?.qualifying,
+    1,
+    "one-half of 100 is 50; 55 clears it, and the SAME ballots settle at Very Good",
+  );
+});
+
+test("MJ: the recomputation uses the document's published fraction, not three-fifths", () => {
+  // Identical ballots, identical weights, one difference: the fraction the document says it was
+  // settled at. If this verifier ignored the field, both halves would produce the same grade —
+  // and the whole of §6.5 would be decoration.
+  const grades = (g: number[]): number[] => g.map((x, c) => c * GRADES.length + x);
+  const votes = [
+    { account: "a", selection: grades([1]) }, // Very Good
+    { account: "b", selection: grades([2]) }, // Good
+  ];
+  const weights = new Map([
+    ["a", d(55)],
+    ["b", d(45)],
+  ]);
+
+  const underThreeFifths = mjBlock(deriveFigures(mjSpec(1), votes, weights));
+  assert.equal(underThreeFifths.candidates[0]?.qualifying_grade, 2, "a document publishing 3/5");
+
+  const underOneHalf = mjBlock(
+    deriveFigures(mjSpec(1, { gradeQuantile: ONE_HALF }), votes, weights),
+  );
+  assert.equal(
+    underOneHalf.candidates[0]?.qualifying_grade,
+    1,
+    "a document publishing 1/2 settles one grade HIGHER off the same ballots — which it can " +
+      "only do if the published fraction is what was applied",
+  );
+});
+
+test("the published fraction is echoed back exactly, so it is checkable rather than assumed", () => {
+  const grades = (g: number[]): number[] => g.map((x, c) => c * GRADES.length + x);
+  const votes = [{ account: "a", selection: grades([0]) }];
+  const weights = new Map([["a", d(200)]]);
+
+  const published = mjBlock(deriveFigures(mjSpec(1, { gradeQuantile: ONE_HALF }), votes, weights));
+  assert.deepEqual(
+    published.grade_quantile,
+    { numerator: 1, denominator: 2 },
+    "an exact fraction, never a decimal — 0.6 has no exact binary representation and the " +
+      "comparison cross-multiplies",
+  );
+
+  // A document that publishes no fraction gets none back. The block is compared structurally,
+  // so inventing the field here would report every pre-v15 election as a figure difference.
+  const absent = mjBlock(deriveFigures(mjSpec(1), votes, weights));
+  assert.equal(
+    "grade_quantile" in absent,
+    false,
+    "a v14 document carries no such field, and neither may its recomputation",
+  );
+});
+
+test("a document with no published fraction falls back to three-fifths", () => {
+  // v14 and earlier. Absent is not a licence to pick a quantile: it pins the recomputation to
+  // the one the engine of that vintage applied, which is three-fifths.
+  const grades = (g: number[]): number[] => g.map((x, c) => c * GRADES.length + x);
+  const votes = [
+    { account: "a", selection: grades([1]) },
+    { account: "b", selection: grades([2]) },
+  ];
+  const weights = new Map([
+    ["a", d(55)],
+    ["b", d(45)],
+  ]);
+  const f = deriveFigures(mjSpec(1, { gradeQuantile: null }), votes, weights);
+  assert.equal(
+    mjBlock(f).candidates[0]?.qualifying_grade,
+    2,
+    "55 of 100 does not reach three-fifths, so Good — the same answer the pre-v15 engine gave",
+  );
+  assert.deepEqual(
+    mjBlock(f).candidates[0]?.qualifying_grade,
+    mjBlock(deriveFigures(mjSpec(1, { gradeQuantile: THREE_FIFTHS }), votes, weights))
+      .candidates[0]?.qualifying_grade,
+    "absent and an explicit three-fifths settle identically; only the echoed field differs",
+  );
+});
+
+/* ------------------------------------------------------------------------------------------
+ * Invalid Majority Judgment ballots and Participation (v15; On-Chain Identifiers &
+ * Verification Policy §4, Proposal & Voting Framework §6.3).
+ *
+ * A ballot that does not grade every candidate exactly once is INVALID rather than partial, and
+ * Participation is the total power of VALID ballots only. Its weight reaches nothing: no option
+ * total, no total_weight, no abstain_weight, no voter_count, no grade. Before v15 it counted
+ * toward total_weight and therefore toward quorum, which let a malformed ballot carry an
+ * election over its quorum without expressing a single grade.
+ * ---------------------------------------------------------------------------------------- */
+
+test("an invalid MJ ballot reaches no aggregate — not even the option totals", () => {
+  const grades = (g: number[]): number[] => g.map((x, c) => c * GRADES.length + x);
+  const votes = [
+    { account: "bad", selection: [0] }, // one grade for a two-candidate election: invalid
+    { account: "a", selection: grades([2, 2]) },
+  ];
+  const weights = new Map([
+    ["bad", d(1000)],
+    ["a", d(60)],
+  ]);
+
+  const f = deriveFigures(mjSpec(2, { quorum: d(0) }), votes, weights);
+  assert.equal(f.totalWeight.toString(), "60", "not total_weight");
+  assert.equal(f.voterCount, 1, "not voter_count — two ballots, one voter");
+  assert.equal(f.totals[0]?.toString(), "0", "not the option total its one index named");
+  assert.equal(f.abstainWeight.toString(), "0", "and it is not an abstention either");
+  for (const c of mjBlock(f).candidates) {
+    assert.equal(c.cast, "60", "and no candidate's cast");
+  }
+  // It is still REPORTED, which is the difference between an invalid ballot and a barred one.
+  assert.deepEqual(mjBlock(f).invalid_ballots, [0]);
+});
+
+test("excluding an invalid MJ ballot can lose the election its quorum", () => {
+  // The malformed ballot holds 1000 of the 1060 that turned up. Counted toward Participation it
+  // carries a quorum of 100 on its own, having graded nobody.
+  const grades = (g: number[]): number[] => g.map((x, c) => c * GRADES.length + x);
+  const votes = [
+    { account: "bad", selection: [0, 1] }, // two grades for candidate 0, none for candidate 1
+    { account: "a", selection: grades([2, 2]) },
+  ];
+  const weights = new Map([
+    ["bad", d(1000)],
+    ["a", d(60)],
+  ]);
+  const f = deriveFigures(mjSpec(2, { quorum: d(100) }), votes, weights);
+  assert.equal(f.totalWeight.toString(), "60");
+  assert.equal(
+    f.quorumMet,
+    false,
+    "60 < the stated quorum of 100. Under the pre-v15 rule the malformed ballot's 1000 was in " +
+      "total_weight and this election met its quorum without a single valid grade being cast",
+  );
+  assert.equal(f.winners, null, "and no quorum is no seats");
+});
+
+test("an empty MJ selection is invalid, so it is not the abstention it would be elsewhere", () => {
+  // Approval voting treats an empty selection as an abstention that counts toward quorum. MJ has
+  // no abstention: a ballot grading nobody leaves every candidate ungraded, which is invalid.
+  const grades = (g: number[]): number[] => g.map((x, c) => c * GRADES.length + x);
+  const votes = [
+    { account: "empty", selection: [] },
+    { account: "a", selection: grades([2]) },
+  ];
+  const weights = new Map([
+    ["empty", d(500)],
+    ["a", d(60)],
+  ]);
+  const f = deriveFigures(mjSpec(1, { quorum: d(0) }), votes, weights);
+  assert.equal(f.abstainWeight.toString(), "0");
+  assert.equal(f.totalWeight.toString(), "60");
+  assert.deepEqual(mjBlock(f).invalid_ballots, [0]);
+});
+
+test("a barred ballot that is ALSO invalid appears in neither the aggregates nor invalid_ballots", () => {
+  // The bar is applied first and the ballot never reaches the validity check. Reporting it as
+  // invalid would accuse a voter of malformity on a ballot that was never eligible to be judged
+  // — and would put an index into `invalid_ballots` that names an excluded ballot.
+  const grades = (g: number[]): number[] => g.map((x, c) => c * GRADES.length + x);
+  const votes = [
+    { account: DAO, selection: [0] }, // barred AND malformed: one grade for two candidates
+    { account: "a", selection: grades([2, 2]) },
+  ];
+  const weights = new Map([
+    [DAO, d(1000)],
+    ["a", d(60)],
+  ]);
+
+  const unbarred = deriveFigures(mjSpec(2, { quorum: d(0) }), votes, weights);
+  assert.deepEqual(
+    mjBlock(unbarred).invalid_ballots,
+    [0],
+    "control: not barred, the same malformed ballot IS reported invalid",
+  );
+
+  const f = deriveFigures(mjSpec(2, { excludedAccounts: [DAO], quorum: d(0) }), votes, weights);
+  assert.deepEqual(f.voteExcluded, [true, false], "the bar is what is reported about it");
+  assert.deepEqual(
+    mjBlock(f).invalid_ballots,
+    [],
+    "and it is not ALSO reported invalid — the two exclusions are not cumulative",
+  );
+  assert.equal(f.totalWeight.toString(), "60", "absent from the aggregates either way");
+  assert.equal(f.voterCount, 1);
+  for (const c of mjBlock(f).candidates) assert.equal(c.cast, "60");
+});
+
 test("a consultation that missed quorum seats nobody", () => {
   const spec: VerdictSpec = {
     kind: "Election",
@@ -449,6 +666,7 @@ test("a consultation that missed quorum seats nobody", () => {
     minUniqueVoters: 0,
     excluded: [],
     excludedAccounts: [],
+    gradeQuantile: null,
   };
   const votes = [{ account: "a", selection: [0, 1] }];
   const weights = new Map([["a", d(10)]]);
