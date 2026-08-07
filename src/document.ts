@@ -15,7 +15,7 @@ import type { Json } from "./canonical.ts";
 import { asArray, asObject, asString } from "./gateway.ts";
 import { GRADES } from "./verdict.ts";
 import type { GradeQuantile } from "./verdict.ts";
-import type { WeightSources } from "./weights.ts";
+import type { NativePoolSources, WeightSources } from "./weights.ts";
 
 /**
  * The document version this verifier is written against.
@@ -185,23 +185,54 @@ function parseWeightSources(raw: unknown): WeightSources {
   const ws = asObject(raw);
   const np = asObject(ws["native_pools"]);
   const mode = asString(np["mode"]) ?? "all";
-  switch (mode) {
+  const nativePools = ((): NativePoolSources => {
+    switch (mode) {
+      case "off":
+        return { mode: "off" };
+      case "all":
+        return { mode: "all" };
+      case "allowlist": {
+        const pools = asArray(np["pools"]).map((p) => {
+          const s = asString(p);
+          if (s === null) fail("weight_sources.native_pools.pools", "contains a non-string");
+          return s;
+        });
+        return { mode: "allowlist", pools };
+      }
+      default:
+        // A typo'd mode is an error, not a fallback to the default: a tally silently verified
+        // under the wrong register weighs the wrong electorate.
+        return fail("weight_sources.native_pools.mode", `has unknown mode ${JSON.stringify(mode)}`);
+    }
+  })();
+
+  // The LSULP leg (tally document v16). ABSENT means off — a v15 document, or a v16 register
+  // that never enabled it, verifies identically. Serialized only when named, so its presence
+  // always carries the exact pair.
+  const lsulpRaw = ws["lsulp"];
+  if (lsulpRaw === undefined || lsulpRaw === null) {
+    return { native_pools: nativePools };
+  }
+  const lp = asObject(lsulpRaw);
+  const lpMode = asString(lp["mode"]) ?? "";
+  switch (lpMode) {
     case "off":
-      return { native_pools: { mode: "off" } };
-    case "all":
-      return { native_pools: { mode: "all" } };
-    case "allowlist": {
-      const pools = asArray(np["pools"]).map((p) => {
-        const s = asString(p);
-        if (s === null) fail("weight_sources.native_pools.pools", "contains a non-string");
-        return s;
-      });
-      return { native_pools: { mode: "allowlist", pools } };
+      return { native_pools: nativePools };
+    case "component": {
+      const component = asString(lp["component"]);
+      const resource = asString(lp["resource"]);
+      if (component === null || component === "") {
+        return fail("weight_sources.lsulp.component", "is missing or not a string");
+      }
+      if (resource === null || resource === "") {
+        return fail("weight_sources.lsulp.resource", "is missing or not a string");
+      }
+      return { native_pools: nativePools, lsulp: { mode: "component", component, resource } };
     }
     default:
-      // A typo'd mode is an error, not a fallback to the default: a tally silently verified
-      // under the wrong register weighs the wrong electorate.
-      return fail("weight_sources.native_pools.mode", `has unknown mode ${JSON.stringify(mode)}`);
+      // Same discipline as native_pools: an unknown mode is an error. There is deliberately
+      // no discovery mode — the pair is named or the leg is off.
+      return fail("weight_sources.lsulp.mode", `has unknown mode ${JSON.stringify(lpMode)}`);
   }
 }
 

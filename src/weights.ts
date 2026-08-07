@@ -10,8 +10,11 @@
  *                       lsu_balance × validator_stake_xrd ÷ lsu_total_supply
  *                   + Σ over native pool units held:
  *                       unit_balance × pool_xrd_backing ÷ unit_total_supply
+ *                   + (v16, when the register names an lsulp pair):
+ *                       lsulp_balance × dex_valuation_xrd ÷ lsulp_total_supply
  *
- * where a pool's XRD backing is its own XRD vault plus its LSUs converted by the same rule.
+ * where a pool's XRD backing is its own XRD vault plus its LSUs converted by the same rule,
+ * plus any register-named LSULP it holds at the same lsulp rate.
  * Which pool units count is governed by the document's own `weight_sources` register — this
  * module reads the register from the document and applies it; it has no rule of its own.
  *
@@ -50,8 +53,22 @@ export type NativePoolSources =
   | { mode: "all" }
   | { mode: "allowlist"; pools: string[] };
 
+/**
+ * The LSULP leg (tally document v16). Named-pair only, never discovered: the pricing input
+ * (`dex_valuation_xrd`) is a number the named component reports about itself, with no
+ * `pool_unit`-style back-reference to verify, so the document either names the exact
+ * component + resource pair or the leg is off. The reference engine cross-checks the
+ * self-report against the component's vaults as an operator diagnostic; the PUBLISHED rule —
+ * and therefore this verifier — is the pure formula, so recomputation needs no judgment call.
+ */
+export type LsulpSource =
+  | { mode: "off" }
+  | { mode: "component"; component: string; resource: string };
+
 export interface WeightSources {
   native_pools: NativePoolSources;
+  /** Absent = off — v15 documents (and v16 documents that never enabled the leg) verify identically. */
+  lsulp?: LsulpSource;
 }
 
 /** What a held fungible turns out to be once looked up at the snapshot. */
@@ -254,6 +271,59 @@ export function verifiedPoolUnits(
   return out;
 }
 
+/** One named `field_name` out of a component's Gateway-rendered state fields. */
+function stateField(item: Record<string, unknown>, name: string): string | null {
+  const fields = asArray(asObject(asObject(item["details"])["state"])["fields"]);
+  for (const f of fields) {
+    const o = asObject(f);
+    if (asString(o["field_name"]) === name) return asString(o["value"]);
+  }
+  return null;
+}
+
+/** The pure LSULP rate: `dex_valuation_xrd ÷ total_supply`, a non-positive supply yielding 0. */
+export function lsulpRateFrom(dexValuationXrd: Dec, totalSupply: Dec): Dec {
+  return totalSupply.isPositive() ? dexValuationXrd.div(totalSupply) : Dec.ZERO;
+}
+
+/**
+ * LSULP → XRD rate at the snapshot, from the document-named pair. Errors — rather than
+ * zeroing — when the pair cannot be read: a register that names an unreadable source is a
+ * broken document, and a silent zero would "verify" a tally while valuing every LSULP holder
+ * at nothing.
+ */
+async function fetchLsulpRate(
+  gw: GatewayClient,
+  component: string,
+  resource: string,
+  stateVersion: number,
+): Promise<Dec> {
+  const resp = asObject(
+    await gw.entityDetails([component, resource], stateVersion, { global: false, explicitMetadata: [] }),
+  );
+  const items = asArray(resp["items"]).map((i) => asObject(i));
+  const compItem = items.find((i) => asString(i["address"]) === component);
+  if (compItem === undefined) {
+    throw new GatewayError(
+      `lsulp register names component ${component}, which the gateway did not return at sv ${stateVersion}`,
+    );
+  }
+  const valuation = stateField(compItem, "dex_valuation_xrd");
+  if (valuation === null) {
+    throw new GatewayError(
+      `lsulp component ${component} has no dex_valuation_xrd state field at sv ${stateVersion}`,
+    );
+  }
+  const resItem = items.find((i) => asString(i["address"]) === resource);
+  if (resItem === undefined) {
+    throw new GatewayError(
+      `lsulp register names resource ${resource}, which the gateway did not return at sv ${stateVersion}`,
+    );
+  }
+  const supply = asString(asObject(resItem["details"])["total_supply"]) ?? "0";
+  return lsulpRateFrom(Dec.parse(valuation), Dec.parse(supply));
+}
+
 /** The XRD a stake-unit balance represents, or zero when the resource is not a stake unit. */
 function lsuValue(
   resource: string,
@@ -284,6 +354,16 @@ export async function computeAccountWeights(
 
   const fungibles = await fetchFungiblesAt(gw, accounts, snapshotStateVersion);
   const lsuMap = await fetchValidatorLsuMap(gw, snapshotStateVersion);
+
+  // The LSULP leg, when the document's register names a pair: one rate for the whole tally,
+  // read at the same state version as everything else.
+  const lsulp = sources.lsulp;
+  const lsulpRate =
+    lsulp !== undefined && lsulp.mode === "component"
+      ? { resource: lsulp.resource, rate: await fetchLsulpRate(gw, lsulp.component, lsulp.resource, snapshotStateVersion) }
+      : null;
+  const lsulpValue = (resource: string, amount: Dec): Dec =>
+    lsulpRate !== null && resource === lsulpRate.resource ? amount.mul(lsulpRate.rate) : Dec.ZERO;
 
   // Everything the voters hold except XRD itself, looked up once: supply for the
   // conversions, `pool` metadata to find the pool units among them.
@@ -324,12 +404,14 @@ export async function computeAccountWeights(
   const supplyOf = (resource: string): Dec | null =>
     heldInfo.get(resource)?.totalSupply ?? poolLsuInfo.get(resource)?.totalSupply ?? null;
 
-  // XRD backing per pool: its own XRD vault plus any LSUs it holds, converted by the same rule.
+  // XRD backing per pool: its own XRD vault plus any LSUs it holds, converted by the same
+  // rule — plus any register-named LSULP it holds, at the same rate as directly-held LSULP.
   const poolBacking = new Map<string, Dec>();
   for (const [pool, balances] of poolBalances) {
     let backing = balances.get(xrdResource) ?? Dec.ZERO;
     for (const [resource, amount] of balances) {
       backing = backing.add(lsuValue(resource, amount, lsuMap, supplyOf));
+      backing = backing.add(lsulpValue(resource, amount));
     }
     poolBacking.set(pool, backing);
   }
@@ -339,6 +421,7 @@ export async function computeAccountWeights(
     let weight = balances.get(xrdResource) ?? Dec.ZERO;
     for (const [resource, amount] of balances) {
       weight = weight.add(lsuValue(resource, amount, lsuMap, supplyOf));
+      weight = weight.add(lsulpValue(resource, amount));
       const pool = poolOf.get(resource);
       if (pool !== undefined) {
         const backing = poolBacking.get(pool);

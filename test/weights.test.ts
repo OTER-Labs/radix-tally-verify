@@ -17,11 +17,12 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
 import { Dec } from "../src/decimal.ts";
-import { computeAccountWeights, verifiedPoolUnits } from "../src/weights.ts";
+import { computeAccountWeights, lsulpRateFrom, verifiedPoolUnits } from "../src/weights.ts";
 
 import {
   ACCOUNT_A,
   ACCOUNT_B,
+  FakeGateway,
   IMPOSTOR,
   POOL,
   POOL_UNIT,
@@ -125,4 +126,147 @@ test("an unknown account weighs zero rather than failing the tally", async () =>
     XRD,
   );
   assert.equal(weights.get("account_rdx1nobody")?.toString(), "0");
+});
+
+// ---------------------------------------------------------------------------------------
+// The LSULP leg (tally document v16). Named-pair only; absent = off, so every test above
+// doubles as the "v15 document verifies unchanged" case.
+// ---------------------------------------------------------------------------------------
+
+const LSULP = "resource_rdx1lsulp0000000000000000000000000000000000000000000007";
+const LSU_POOL = "component_rdx1lsupool00000000000000000000000000000000000000008";
+
+/** Accounts hold XRD and LSULP; the register names the pair; native pools are off. Call
+ * order: accounts details → validators → the lsulp pair → held resources. */
+function lsulpGateway(): FakeGateway {
+  return new FakeGateway()
+    .onDetails({
+      items: [
+        {
+          address: ACCOUNT_A,
+          fungible_resources: {
+            items: [
+              { resource_address: XRD, amount: "100" },
+              { resource_address: LSULP, amount: "10" },
+            ],
+            next_cursor: null,
+          },
+        },
+      ],
+    })
+    .onValidators({ validators: { items: [], next_cursor: null } })
+    .onDetails({
+      items: [
+        {
+          address: LSU_POOL,
+          details: {
+            state: {
+              fields: [
+                { field_name: "unrelated", value: "9" },
+                { field_name: "dex_valuation_xrd", value: "300" },
+              ],
+            },
+          },
+        },
+        { address: LSULP, details: { total_supply: "200" } },
+      ],
+    })
+    .onDetails({
+      items: [
+        { address: LSULP, details: { total_supply: "200" }, explicit_metadata: { items: [] } },
+      ],
+    });
+}
+
+test("a register-named lsulp balance counts at dex_valuation_xrd over supply", async () => {
+  const weights = await computeAccountWeights(
+    lsulpGateway(),
+    [ACCOUNT_A],
+    SNAPSHOT_SV,
+    {
+      native_pools: { mode: "off" },
+      lsulp: { mode: "component", component: LSU_POOL, resource: LSULP },
+    },
+    XRD,
+  );
+  // 100 XRD + 10 LSULP × (300 ÷ 200) = 115.
+  assert.equal(weights.get(ACCOUNT_A)?.toString(), "115");
+});
+
+test("an lsulp leg that is off (or absent) counts the balance at zero", async () => {
+  // Same holdings, no lsulp leg: the pair is never fetched (the fake gateway would throw on
+  // the unexpected call), and the LSULP balance contributes nothing.
+  const gw = new FakeGateway()
+    .onDetails({
+      items: [
+        {
+          address: ACCOUNT_A,
+          fungible_resources: {
+            items: [
+              { resource_address: XRD, amount: "100" },
+              { resource_address: LSULP, amount: "10" },
+            ],
+            next_cursor: null,
+          },
+        },
+      ],
+    })
+    .onValidators({ validators: { items: [], next_cursor: null } })
+    .onDetails({
+      items: [
+        { address: LSULP, details: { total_supply: "200" }, explicit_metadata: { items: [] } },
+      ],
+    });
+  const weights = await computeAccountWeights(
+    gw,
+    [ACCOUNT_A],
+    SNAPSHOT_SV,
+    { native_pools: { mode: "off" } },
+    XRD,
+  );
+  assert.equal(weights.get(ACCOUNT_A)?.toString(), "100");
+});
+
+test("lsulp rate arithmetic: truncating division, zero on a non-positive supply", () => {
+  assert.equal(lsulpRateFrom(Dec.parse("300"), Dec.parse("200")).toString(), "1.5");
+  assert.equal(lsulpRateFrom(Dec.parse("100"), Dec.ZERO).toString(), "0");
+  assert.equal(lsulpRateFrom(Dec.parse("100"), Dec.parse("-1")).toString(), "0");
+  assert.equal(lsulpRateFrom(Dec.ZERO, Dec.parse("5")).toString(), "0");
+});
+
+test("a named pair the gateway cannot price is an error, not a zero", async () => {
+  // The component comes back without a dex_valuation_xrd field: the tally must refuse to
+  // verify rather than silently valuing every LSULP holder at nothing.
+  const gw = new FakeGateway()
+    .onDetails({
+      items: [
+        {
+          address: ACCOUNT_A,
+          fungible_resources: {
+            items: [{ resource_address: LSULP, amount: "10" }],
+            next_cursor: null,
+          },
+        },
+      ],
+    })
+    .onValidators({ validators: { items: [], next_cursor: null } })
+    .onDetails({
+      items: [
+        { address: LSU_POOL, details: { state: { fields: [] } } },
+        { address: LSULP, details: { total_supply: "200" } },
+      ],
+    });
+  await assert.rejects(
+    computeAccountWeights(
+      gw,
+      [ACCOUNT_A],
+      SNAPSHOT_SV,
+      {
+        native_pools: { mode: "off" },
+        lsulp: { mode: "component", component: LSU_POOL, resource: LSULP },
+      },
+      XRD,
+    ),
+    /no dex_valuation_xrd/,
+  );
 });
