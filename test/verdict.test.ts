@@ -21,6 +21,7 @@ import {
   allocateSeatsMajorityJudgment,
   allocateSeatsPlurality,
   allocateSeatsSpav,
+  approvalBarIsInclusive,
   bindingApproved,
   deriveFigures,
 } from "../src/verdict.ts";
@@ -28,6 +29,10 @@ import type { Ballot, DerivedFigures, GradeQuantile, VerdictSpec } from "../src/
 
 const d = (v: number): Dec => Dec.fromInt(BigInt(v));
 const NONE: number[] = [];
+
+/** The two approval comparisons, named so each call site says which rule it asserts. */
+const INCLUSIVE = true;
+const STRICT = false;
 
 const ballot = (weight: number, approvals: number[]): Ballot => ({
   weight: d(weight),
@@ -42,16 +47,177 @@ const mj = (weight: number, grades: number[]): Ballot => ({
 
 test("MAS blocks approval on a thin affirmative base", () => {
   // 100 approve, 0 reject (100% of decisive), quorum met — MAS 800 says no.
-  assert.equal(bindingApproved(d(100), d(0), d(50), d(800), true), false);
-  assert.equal(bindingApproved(d(800), d(0), d(50), d(800), true), true, "floor reached is floor met");
-  assert.equal(bindingApproved(d(799), d(0), d(50), d(800), true), false);
+  assert.equal(bindingApproved(d(100), d(0), d(50), d(800), true, INCLUSIVE), false);
+  assert.equal(bindingApproved(d(800), d(0), d(50), d(800), true, INCLUSIVE), true, "floor reached is floor met");
+  assert.equal(bindingApproved(d(799), d(0), d(50), d(800), true, INCLUSIVE), false);
 });
 
 test("MAS is a floor on top of the other gates, never a substitute", () => {
-  assert.equal(bindingApproved(d(900), d(0), d(50), d(800), false), false, "quorum missed");
-  assert.equal(bindingApproved(d(900), d(1100), d(50), d(800), true), false, "45% of decisive");
-  assert.equal(bindingApproved(d(51), d(49), d(50), d(0), true), true, "strict majority passes");
-  assert.equal(bindingApproved(d(50), d(50), d(50), d(0), true), false, "an exact tie fails");
+  assert.equal(bindingApproved(d(900), d(0), d(50), d(800), false, INCLUSIVE), false, "quorum missed");
+  assert.equal(bindingApproved(d(900), d(1100), d(50), d(800), true, INCLUSIVE), false, "45% of decisive");
+  assert.equal(bindingApproved(d(51), d(49), d(50), d(0), true, INCLUSIVE), true, "a majority passes");
+  assert.equal(
+    bindingApproved(d(900), d(0), d(50), d(901), true, INCLUSIVE),
+    false,
+    "a landslide under the MAS floor still fails — the floor is not a formality",
+  );
+});
+
+/**
+ * The approval bar is AT-OR-ABOVE (tally document v20).
+ *
+ * The framework writes every bar as "≥ 66% / ≥ 60% / ≥ 50% YES" and says a proposal passes when
+ * it MEETS the approval threshold. Under the strict comparison this rule used through v19, a 100
+ * bar was unreachable even by unanimity and an exact tie at a 50 bar failed. Neither is an answer
+ * the bar gives.
+ *
+ * Each of the four cases below is a place the two comparisons disagree, or where an inclusive
+ * test without its guard goes wrong:
+ */
+test("the approval bar is at-or-above, with no decisive vote guarded", () => {
+  // 1. An exact tie at a 50 bar PASSES. 50 of 100 decisive is 50%, and 50% meets 50%.
+  assert.equal(bindingApproved(d(50), d(50), d(50), d(0), true, INCLUSIVE), true, "an exact tie meets a 50 bar");
+
+  // 2. Unanimity at a 100 bar PASSES. Under the strict test nothing could ever clear a 100 bar,
+  //    which made the highest bar the framework can set unreachable rather than merely demanding.
+  assert.equal(bindingApproved(d(100), d(0), d(100), d(0), true, INCLUSIVE), true, "unanimity meets a 100 bar");
+
+  // 3. All-abstain WITH quorum is NOT approved. This is what the explicit `decisive > 0` guard
+  //    buys: with no decisive vote at all, `0 * 100 >= 0 * threshold` is true, so without the
+  //    guard every quorate abstention-only consultation would clear its ratio and pass on nothing
+  //    whatsoever. Quorum counts abstaining weight, which is exactly why it can be met here.
+  assert.equal(
+    bindingApproved(d(0), d(0), d(50), d(0), true, INCLUSIVE),
+    false,
+    "a consultation nobody voted decisively on is not approved by 0 >= 0",
+  );
+
+  // 4. Just under the bar still FAILS. Inclusive is not lenient: 65999 of 100000 decisive is
+  //    65.999%, which does not meet 66.
+  assert.equal(
+    bindingApproved(d(65999), d(34001), d(66), d(0), true, INCLUSIVE),
+    false,
+    "65.999% does not meet a 66 bar",
+  );
+  assert.equal(
+    bindingApproved(d(66000), d(34000), d(66), d(0), true, INCLUSIVE),
+    true,
+    "...and exactly 66% does",
+  );
+});
+
+/**
+ * Which comparison applies is the DOCUMENT's to say, not this verifier's.
+ *
+ * This is the Grade Quantile rule applied to the other moving bar. A v19 consultation that landed
+ * exactly on its bar was correctly recorded as failing under the rule in force when it was
+ * settled; recomputing it with today's comparison would report a correct historical tally as a
+ * lie, which is precisely the failure the published quantile exists to prevent.
+ */
+test("each document's approval bar is the one in force when it was settled", () => {
+  // The seam: 50/50 at a 50 bar. The two comparisons disagree here and nowhere else that
+  // matters.
+  assert.equal(approvalBarIsInclusive(20), true, "v20 settled inclusively");
+  assert.equal(approvalBarIsInclusive(19), false, "v19 settled strictly");
+  assert.equal(approvalBarIsInclusive(15), false);
+  assert.equal(
+    approvalBarIsInclusive(null),
+    false,
+    "an absent version pins the recomputation to the older rule — absence is not a licence to " +
+      "have applied an unannounced newer one",
+  );
+  assert.equal(approvalBarIsInclusive(21), true, "and a later version keeps the newer rule");
+
+  assert.equal(bindingApproved(d(50), d(50), d(50), d(0), true, INCLUSIVE), true);
+  assert.equal(
+    bindingApproved(d(50), d(50), d(50), d(0), true, STRICT),
+    false,
+    "the same tally under a v19 document is still correctly recorded as failing",
+  );
+
+  // Away from the seam the two agree completely, which is why only a handful of historical
+  // results are affected at all.
+  for (const [a, r] of [
+    [51, 49],
+    [49, 51],
+    [100, 0],
+    [0, 100],
+  ] as Array<[number, number]>) {
+    assert.equal(
+      bindingApproved(d(a), d(r), d(50), d(0), true, INCLUSIVE),
+      bindingApproved(d(a), d(r), d(50), d(0), true, STRICT),
+      `${a}/${r} is not on the seam, so both comparisons agree`,
+    );
+  }
+
+  // The `decisive > 0` guard matters only under the inclusive comparison; under the strict one
+  // `0 > 0` was already false. Both refuse an all-abstain consultation, by different routes.
+  assert.equal(bindingApproved(d(0), d(0), d(50), d(0), true, INCLUSIVE), false);
+  assert.equal(bindingApproved(d(0), d(0), d(50), d(0), true, STRICT), false);
+});
+
+test("a v19 document on its bar is recomputed strictly, end to end", () => {
+  const votes = [
+    { account: "a", selection: [1] },
+    { account: "b", selection: [0] },
+  ];
+  const weights = new Map([
+    ["a", d(50)],
+    ["b", d(50)],
+  ]);
+  const spec = bindingSpec({ quorum: d(1), approvalThresholdPc: d(50), minAffirmativeSupport: d(0) });
+  assert.equal(
+    deriveFigures({ ...spec, tallyDocVersion: 20 }, votes, weights).approved,
+    true,
+    "the same ballots pass under a v20 document",
+  );
+  assert.equal(
+    deriveFigures({ ...spec, tallyDocVersion: 19 }, votes, weights).approved,
+    false,
+    "and fail under a v19 one — each verifies against the rule that produced it",
+  );
+});
+
+/**
+ * The same four boundaries through `deriveFigures`, over real ballots rather than the gate
+ * function alone — because `approved` is what a document publishes, and the path from ballots to
+ * that boolean is where a wired-up-wrong gate would still look right in isolation.
+ */
+test("the verdict boundaries hold end to end, from ballots to `approved`", () => {
+  const bal = (account: string, selection: number[]) => ({ account, selection });
+  const w = (entries: Array<[string, number]>) =>
+    new Map(entries.map(([a, n]) => [a, d(n)] as const));
+
+  // Options are fixed at [Reject, Approve] for a Binding consultation.
+  const run = (
+    votes: Array<{ account: string; selection: number[] }>,
+    weights: Map<string, Dec>,
+    threshold: number,
+  ) =>
+    deriveFigures(
+      bindingSpec({ quorum: d(1), approvalThresholdPc: d(threshold), minAffirmativeSupport: d(0) }),
+      votes,
+      weights,
+    );
+
+  const tie = run([bal("a", [1]), bal("b", [0])], w([["a", 50], ["b", 50]]), 50);
+  assert.equal(tie.quorumMet, true);
+  assert.equal(tie.approved, true, "a tie at a 50 bar passes");
+
+  const unanimous = run([bal("a", [1])], w([["a", 100]]), 100);
+  assert.equal(unanimous.approved, true, "unanimity at a 100 bar passes");
+
+  const abstained = run([bal("a", []), bal("b", [])], w([["a", 60], ["b", 60]]), 50);
+  assert.equal(abstained.quorumMet, true, "abstaining weight still carries the quorum");
+  assert.equal(abstained.totalWeight.toString(), "120");
+  assert.equal(abstained.approved, false, "but an all-abstain consultation is not approved");
+
+  const justUnder = run(
+    [bal("a", [1]), bal("b", [0])],
+    w([["a", 65999], ["b", 34001]]),
+    66,
+  );
+  assert.equal(justUnder.approved, false, "65.999% does not meet a 66 bar");
 });
 
 test("plurality seats the highest totals and breaks ties to the lowest index", () => {
@@ -196,6 +362,8 @@ test("an abstention counts toward quorum and toward no option", () => {
     excluded: [],
     excludedAccounts: [],
     gradeQuantile: null,
+    delegationInput: null,
+    tallyDocVersion: 20,
   };
   const votes = [
     { account: "a", selection: [] }, // abstains — carries the consultation over quorum
@@ -225,6 +393,8 @@ test("quorum has two legs and both must hold", () => {
     excluded: [],
     excludedAccounts: [],
     gradeQuantile: null,
+    delegationInput: null,
+    tallyDocVersion: 20,
   };
   const votes = [
     { account: "a", selection: [0] },
@@ -264,6 +434,8 @@ function bindingSpec(over: Partial<VerdictSpec> = {}): VerdictSpec {
     excluded: [],
     excludedAccounts: [],
     gradeQuantile: null,
+    delegationInput: null,
+    tallyDocVersion: 20,
     ...over,
   };
 }
@@ -386,6 +558,8 @@ const mjSpec = (candidates: number, over: Partial<VerdictSpec> = {}): VerdictSpe
   excluded: [],
   excludedAccounts: [],
   gradeQuantile: null,
+  delegationInput: null,
+  tallyDocVersion: 20,
   ...over,
 });
 
@@ -667,6 +841,8 @@ test("a consultation that missed quorum seats nobody", () => {
     excluded: [],
     excludedAccounts: [],
     gradeQuantile: null,
+    delegationInput: null,
+    tallyDocVersion: 20,
   };
   const votes = [{ account: "a", selection: [0, 1] }];
   const weights = new Map([["a", d(10)]]);

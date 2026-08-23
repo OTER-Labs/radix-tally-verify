@@ -18,10 +18,18 @@ export function fixture(name: string): unknown {
   return JSON.parse(readFileSync(join(HERE, "fixtures", name), "utf8")) as unknown;
 }
 
+/** An empty page — what the Gateway returns for an account that holds none of what was asked. */
+const EMPTY_PAGE = { items: [] };
+
 export class FakeGateway implements GatewayClient {
   private detailsQueue: unknown[] = [];
   private pageResponses = new Map<string, unknown>();
   private validatorsQueue: unknown[] = [];
+  private vaultDetailsQueue: unknown[] = [];
+  private nonFungiblesByAccount = new Map<string, unknown>();
+  private nonFungibleDataByResource = new Map<string, unknown>();
+  private kvsKeys = new Map<string, unknown>();
+  private kvsData = new Map<string, unknown>();
 
   /** Fail the test on any call the fixture set did not anticipate. */
   calls: string[] = [];
@@ -39,6 +47,110 @@ export class FakeGateway implements GatewayClient {
   onValidators(response: unknown): this {
     this.validatorsQueue.push(response);
     return this;
+  }
+
+  /* ---- the v17 concentrated-liquidity reads --------------------------------
+   * Programmed by ADDRESS rather than by queue position. The precision and shape legs
+   * interleave their calls with each other and with the fungible legs, and a queue would make
+   * every test depend on an ordering the implementation is free to change; keying on the
+   * address asserts what was asked for instead.
+   *
+   * An unprogrammed non-fungible read returns an EMPTY page rather than failing, because "this
+   * account holds none of these" is the answer for almost every account in almost every test —
+   * making it explicit everywhere would bury the case each test is actually about. The
+   * entityDetails queue keeps its fail-loudly behaviour, since those calls are the ones whose
+   * order is the contract.
+   */
+
+  onVaultDetails(response: unknown): this {
+    this.vaultDetailsQueue.push(response);
+    return this;
+  }
+
+  onNonFungibles(account: string, response: unknown): this {
+    this.nonFungiblesByAccount.set(account, response);
+    return this;
+  }
+
+  onNonFungibleData(resource: string, response: unknown): this {
+    this.nonFungibleDataByResource.set(resource, response);
+    return this;
+  }
+
+  onKvsKeys(kvsAddress: string, response: unknown): this {
+    this.kvsKeys.set(kvsAddress, response);
+    return this;
+  }
+
+  onKvsData(kvsAddress: string, response: unknown): this {
+    this.kvsData.set(kvsAddress, response);
+    return this;
+  }
+
+  entityDetailsVault(addresses: string[], _stateVersion: number): Promise<unknown> {
+    this.calls.push(`vault-details:${addresses.join(",")}`);
+    const next = this.vaultDetailsQueue.shift();
+    if (next === undefined) {
+      throw new GatewayError(
+        `FakeGateway: unexpected entityDetailsVault for ${addresses.join(",")}`,
+      );
+    }
+    return Promise.resolve(next);
+  }
+
+  entityNonFungiblesPage(
+    address: string,
+    _cursor: string | null,
+    _stateVersion: number,
+  ): Promise<unknown> {
+    this.calls.push(`non-fungibles:${address}`);
+    return Promise.resolve(this.nonFungiblesByAccount.get(address) ?? EMPTY_PAGE);
+  }
+
+  entityNonFungibleVaultsPage(
+    address: string,
+    resource: string,
+    cursor: string,
+    _stateVersion: number,
+  ): Promise<unknown> {
+    this.calls.push(`nf-vaults:${address}:${resource}:${cursor}`);
+    return Promise.resolve(EMPTY_PAGE);
+  }
+
+  entityNonFungibleVaultIdsPage(
+    _address: string,
+    _resource: string,
+    vaultAddress: string,
+    cursor: string,
+    _stateVersion: number,
+  ): Promise<unknown> {
+    this.calls.push(`nf-ids:${vaultAddress}:${cursor}`);
+    return Promise.resolve(EMPTY_PAGE);
+  }
+
+  nonFungibleData(resource: string, ids: string[], _stateVersion: number): Promise<unknown> {
+    this.calls.push(`nf-data:${resource}:${ids.join(",")}`);
+    return Promise.resolve(
+      this.nonFungibleDataByResource.get(resource) ?? { non_fungible_ids: [] },
+    );
+  }
+
+  keyValueStoreKeys(
+    kvsAddress: string,
+    _cursor: string | null,
+    _stateVersion: number,
+  ): Promise<unknown> {
+    this.calls.push(`kvs-keys:${kvsAddress}`);
+    return Promise.resolve(this.kvsKeys.get(kvsAddress) ?? EMPTY_PAGE);
+  }
+
+  keyValueStoreData(
+    kvsAddress: string,
+    _keys: unknown[],
+    _stateVersion: number,
+  ): Promise<unknown> {
+    this.calls.push(`kvs-data:${kvsAddress}`);
+    return Promise.resolve(this.kvsData.get(kvsAddress) ?? { entries: [] });
   }
 
   entityDetails(

@@ -3,9 +3,16 @@
 Independently recompute a Radix governance consultation's tally from Gateway state, and check it
 against the hash committed on-ledger.
 
-**Status: working.** The full pipeline exists: weight recomputation from Gateway historical
-state, verdict re-derivation, canonical re-serialization, and the hash check, behind a CLI
-whose exit codes distinguish the three outcomes above.
+**Status: working. Supported tally document version: 20.** The full pipeline exists: weight
+recomputation from Gateway historical state, verdict re-derivation, canonical re-serialization,
+and the hash check, behind a CLI whose exit codes distinguish the three outcomes above.
+
+No document is refused for its version. Verification is driven by field presence, so one written
+before any given leg existed takes the absent-means-off path on each field and verifies exactly as
+it did before that leg was added. The version number itself is read for one purpose only: the
+v19→v20 verdict change is a *comparison* rather than a field, so each document's `approved` is
+recomputed under the bar in force when it was settled — see
+[the approval bar](#the-approval-bar-is-at-or-above).
 
 ---
 
@@ -54,6 +61,7 @@ noise:
 | Figures match, hash differs | A **serialization** disagreement, not a lie. One implementation departed from the spec — most often by parsing a `Decimal` string as a float, or by preserving insertion order instead of sorting keys. |
 | Figures differ | The real signal. Someone's arithmetic, weights, or ballot set is not what they published. |
 | Gateway unreachable, or the snapshot state version pruned | **Unknown**, not "failed". A verifier that reports infrastructure trouble as a discrepancy trains people to ignore it. |
+| The document's own register names a component the ledger says is not that thing | **Malformed**, not a discrepancy. The gateway answered and contradicted the document: its stated weight rule cannot be applied to the ledger it pins, so there is no figure to disagree about. Calling that a discrepancy would accuse a publisher of arithmetic they never got to do. |
 
 ## What works today
 
@@ -63,22 +71,69 @@ noise:
 - **`src/canonical.ts`** — the canonical JSON encoding and the blake2b-256 tally hash.
 - **`src/gateway.ts`** — a minimal Gateway client pinned to an explicit `state_version`, covering
   only the three endpoints the weight rule reads.
-- **`src/weights.ts`** — the weight rule itself: XRD plus validator stake units at their
-  redemption rate plus round-trip-verified native pool units, under the register the document
-  carries. Pool units held *by* a pool are not followed (one level), and non-fungible liquidity
-  positions are not counted — both deliberate, both inherited from the reference rule.
-- **`src/verdict.ts`** — quorum (both legs), the Binding gates (strict decisive ratio, MAS
-  floor), the DAO-controlled-funds bar, the valid-ballots-only Participation rule, and the three
-  seat rules (Plurality, SPAV, Majority Judgment) applied from the document's own stated
-  parameters, down to the Grade Quantile it publishes.
+- **`src/precise.ts`** — scrypto `PreciseDecimal`: the 36-decimal, I256 fixed point the
+  concentrated-liquidity legs are evaluated in before being narrowed back to 18. A separate type
+  from `Dec` on purpose, because the two scales are not interchangeable in the rule.
+- **`src/weights.ts`** — the weight rule itself, under the register the document carries. See the
+  coverage table below for which legs are read and how.
+- **`src/concentrated.ts`** — the two concentrated-liquidity legs: the tick power, the
+  three-branch removable-amount split, the bin-claim resolution, and the non-fungible read path
+  they need.
+- **`src/delegation.ts`** — the delegation resolution: one hop, direct-ballot revocation, the
+  effectiveness conditions, and the bar enforced on the delegation graph.
+- **`src/verdict.ts`** — quorum (both legs), the Binding gates (the at-or-above decisive ratio
+  with its `decisive > 0` guard, and the MAS floor), the DAO-controlled-funds bar, the
+  valid-ballots-only Participation rule, delegated weight riding the ballot it attached to, and
+  the three seat rules (Plurality, SPAV, Majority Judgment) applied from the document's own
+  stated parameters, down to the Grade Quantile it publishes.
 - **`src/verify.ts` / `src/cli.ts`** — orchestration and the command line.
-- **`test/`** — cross-implementation agreement, plus weight and verdict logic against fixture
-  Gateway responses. No test touches the network.
+- **`test/`** — cross-implementation agreement, plus weight, concentrated-liquidity, delegation
+  and verdict logic against fixture Gateway responses, and each leg driven end to end through the
+  whole tool. No test touches the network.
 
-What is deliberately not recomputed: the ballot set itself, the withdrawn-candidate set and the
-`excluded_accounts` register are indexer/ledger facts the Gateway historical endpoints used here do
-not serve; they are inputs, covered by the hash like everything else. `eligible_voting_power` is a
-creation-time figure and is likewise carried, not re-derived.
+## Coverage, leg by leg
+
+The weight rule is a sum over sources, and the register the document carries decides which of them
+are switched on. Every leg below is recomputed from Gateway historical state at the document's own
+`snapshot_state_version`:
+
+| Leg | Doc version | What is read | Status |
+|---|---|---|---|
+| Liquid **XRD** | — | account balances, every page | recomputed |
+| **Validator stake units** | — | LSU balance × validator stake ÷ LSU supply | recomputed |
+| **Native pool units** | 4 | pro-rata of the pool's XRD backing, admitted only by the two-way `pool` / `pool_unit` metadata round trip into the `pool_` address space | recomputed |
+| **LSULP** | 16 | the named component's `dex_valuation_xrd` ÷ the named resource's supply; named-or-off, never discovered | recomputed |
+| **Precision pools** (Ociswap `PrecisionPool`, V1 and V2) | 17 | position NFT data and the pool's `price_sqrt`, through the 36-place tick power and the three-branch split; principal only | recomputed |
+| **Shape pools** (CaviarNine `QuantaSwap`) | 17 | receipt `liquidity_claims` against `tick_index.current`, the active reserves, and the full `bin_map` key-value store | recomputed |
+| **Delegation** | 18 | the resolution, the per-delegate sums, and their effect on every total and on the verdict | recomputed **from a carried input** — see below |
+
+And the verdict, in full: quorum on both legs, the Binding gates, the DAO-controlled-funds bar,
+Majority Judgment's qualifying grades and gauges at the document's own quantile, `invalid_ballots`,
+the withdrawn-candidate exclusion, and every seat allocation.
+
+## What is not recomputed, and why
+
+A verifier that is vague about which of its inputs it checked is worse than one that checks less.
+Four things are **inputs**, carried inside the hashed document rather than derived:
+
+- **The ballot set**, the **withdrawn-candidate set** and the **`excluded_accounts` register** —
+  indexer and registry facts the Gateway historical state endpoints do not serve.
+- **`eligible_voting_power`**, a creation-time figure.
+- **`delegation_input`** — *which* delegations were in force at the snapshot, and which delegates
+  had declined. That is a fold over the delegation component's whole write history ordered by
+  `(state_version, sequence)`, which reaches the reference engine through an event indexer, not
+  through the Gateway. Everything downstream of it is recomputed: the resolution and its published
+  refusal reasons, each delegator's weight, the per-delegate sums, `delegated_weight_total`, the
+  per-ballot `delegated_weight` / `effective_weight` split, and every total and verdict they feed.
+- **`weight_set_version` and `excluded_set_version`** (v19) — carried, hashed, and not checked
+  against the registry. Their purpose is to let someone fetch those two on-ledger sets *by version*
+  and confirm the lists this document embeds are the ones it claims to be; doing that needs the
+  consultation registry, which is a different source from the Gateway state endpoints this tool
+  reads. **This is the one gap in the v19 coverage**, and closing it would mean teaching the tool
+  to read the registry.
+
+All of them are covered by the hash exactly as everything else is, so a document that altered one
+would fail the hash check against what was committed on-ledger.
 
 ## The DAO-controlled-funds bar
 
@@ -114,6 +169,42 @@ wrong figure.
 **Version 14 documents keep verifying.** An absent register is `[]` and an absent flag is `false`,
 so a document written before the bar existed takes the same path it always did and hashes to the
 same bytes.
+
+## The approval bar is at-or-above
+
+A Binding consultation passes when
+
+```
+quorum_met
+  AND (approve + reject) > 0
+  AND approve * 100 >= (approve + reject) * approval_threshold_pc
+  AND approve >= min_affirmative_support
+```
+
+The ratio comparison is **inclusive** — document version 20. Through v19 it was strictly greater,
+and that was wrong on the framework's own text: the Parameters Registry writes every bar as
+*"≥ 66% / ≥ 60% / ≥ 50% YES"*, and the Proposal & Voting Framework says a proposal passes when it
+*meets* the approval threshold. Under the strict comparison an exact tie at a 50 bar failed and a
+100 bar was unreachable even by unanimity, which is not what either bar says.
+
+The inclusive test needs a guard the strict one did not. With no decisive vote at all, `0 >= 0` is
+true, so without `(approve + reject) > 0` every quorate abstention-only consultation would clear
+its ratio and pass on nothing whatsoever. Quorum counts abstaining weight — that is the whole
+reason an empty ballot is legal — so this is a reachable state, not a theoretical one.
+
+**Which comparison applies is the document's to say, not this verifier's.** A document publishing
+`tally_doc_version` 20 or above is recomputed inclusively; anything below — or a document
+publishing no version at all — is recomputed with the strict comparison it was settled under.
+
+That is the [Grade Quantile](#the-grade-quantile-is-the-documents-not-the-verifiers) rule applied
+to the other moving bar, for the same reason. A v19 consultation that landed exactly on its bar was
+correctly recorded as failing under the rule in force when it was settled, and a verifier that
+applied today's comparison to it would report a correct historical tally as a lie. An absent
+version pins the recomputation to the older rule: absence is not a licence to have applied an
+unannounced newer one.
+
+The two comparisons disagree only about a tally sitting exactly on its bar. Everywhere else they
+return the same answer, which is why the change touches so few results.
 
 ## The Grade Quantile is the document's, not the verifier's
 
@@ -176,7 +267,7 @@ Exit codes are the contract:
 | 1 | **Figures disagree** — the real signal |
 | 2 | **Serialization disagreement** — figures match, hash differs; a spec departure, not a lie |
 | 3 | **Unknown** — gateway unreachable or the pinned state version pruned |
-| 4 | **Malformed** — the input is not a readable tally document |
+| 4 | **Malformed** — the input is not a readable tally document, or its own register names something the ledger says it is not |
 
 ## Running the tests
 

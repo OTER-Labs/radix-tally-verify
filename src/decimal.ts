@@ -109,6 +109,40 @@ export class Dec {
     return new Dec(truncDiv(this.sub * ONE_SUBUNIT, o.sub));
   }
 
+  /**
+   * Narrow a 36-place `PreciseDecimal` subunit count to this 18-place representation,
+   * truncating toward zero — scrypto's `Decimal::try_from(PreciseDecimal)`, which is
+   * `checked_truncate(RoundingMode::ToZero)`.
+   *
+   * `null` rather than a throw when the value does not fit I192: the concentrated-liquidity
+   * legs turn that into a named refusal ("does not fit the tally's Decimal scale"), because a
+   * position whose value overflows the tally's own scale is not a position worth its maximum.
+   */
+  static fromPreciseSubunits(preciseSub: bigint, preciseScale: bigint): Dec | null {
+    const divisor = 10n ** (preciseScale - DECIMAL_PLACES);
+    const sub = truncDiv(preciseSub, divisor);
+    return sub > I192_MAX || sub < I192_MIN ? null : new Dec(sub);
+  }
+
+  /**
+   * Truncate toward zero to `places` decimal places — scrypto's
+   * `checked_round(places, RoundingMode::ToZero)`.
+   *
+   * Used only by the concentrated-liquidity legs, to reduce a computed token amount to the
+   * amount that would actually be withdrawn at that resource's divisibility. `places >= 18`
+   * leaves the value alone, since 18 is the whole representation.
+   */
+  truncateToPlaces(places: number): Dec {
+    if (!Number.isInteger(places) || places < 0) {
+      throw new RangeError(`decimal places must be a non-negative integer, got ${places}`);
+    }
+    if (BigInt(places) >= DECIMAL_PLACES) return this;
+    const divisor = 10n ** (DECIMAL_PLACES - BigInt(places));
+    // JavaScript's `%` on BigInt is the C-style remainder (sign follows the dividend), which is
+    // exactly what scrypto's ToZero strategy resolves to in both directions.
+    return new Dec(this.sub - (this.sub % divisor));
+  }
+
   cmp(o: Dec): -1 | 0 | 1 {
     return this.sub < o.sub ? -1 : this.sub > o.sub ? 1 : 0;
   }

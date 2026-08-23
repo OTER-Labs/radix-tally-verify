@@ -11,32 +11,55 @@
 
 import { compareUtf8 } from "./canonical.ts";
 import { Dec } from "./decimal.ts";
+import { DELEGATION_REFUSALS } from "./delegation.ts";
+import type { DelegationRefusal, SnapshotDelegation } from "./delegation.ts";
 import type { Json } from "./canonical.ts";
 import { asArray, asObject, asString } from "./gateway.ts";
 import { GRADES } from "./verdict.ts";
 import type { GradeQuantile } from "./verdict.ts";
-import type { NativePoolSources, WeightSources } from "./weights.ts";
+import type {
+  ConcentratedPoolSources,
+  NativePoolSources,
+  WeightSources,
+} from "./weights.ts";
 
 /**
  * The document version this verifier is written against.
  *
- * 15 carries four changes, batched into one bump because a version bump moves every document's
- * hash and each of them would otherwise pay its own rollout:
+ * The versions this field set has travelled through, and what each added:
  *
- *   - the DAO-controlled-funds bar (framework 47ceb27, charter §5): the top-level
- *     `excluded_accounts` register and the per-ballot `excluded` flag;
- *   - `majority_judgment.grade_quantile`, the exact fraction each MJ result was settled at;
- *   - invalid MJ ballots no longer counting toward Participation;
- *   - a corrected weight rule, which this verifier neither stores nor compares (it is hashed
- *     with the rest of the document, and reproducing a multi-kilobyte English string here would
- *     add a second place for it to be wrong).
+ *   - **15** — the DAO-controlled-funds bar (framework 47ceb27, charter §5): the top-level
+ *     `excluded_accounts` register and the per-ballot `excluded` flag; plus
+ *     `majority_judgment.grade_quantile`, and invalid MJ ballots no longer counting toward
+ *     Participation.
+ *   - **16** — the LSULP leg: `weight_sources.lsulp`, a named component+resource pair valued at
+ *     the component's `dex_valuation_xrd` over the resource's total supply.
+ *   - **17** — the two concentrated-liquidity legs: `weight_sources.precision_pools` (Ociswap
+ *     `PrecisionPool`) and `weight_sources.shape_pools` (CaviarNine `QuantaSwap`). The first
+ *     version that counts a non-fungible.
+ *   - **18** — delegation: `weight_sources.delegation`, the `delegation_input` and `delegations`
+ *     reports, `delegated_weight_total`, and the per-ballot `delegated_weight` /
+ *     `effective_weight` split.
+ *   - **19** — `weight_set_version` and `excluded_set_version`: the ON-LEDGER versions of the
+ *     register and the bar that the consultation registry pinned at creation, so the two
+ *     embedded lists can be fetched by version and checked against the sets they claim to be.
+ *   - **20** — the approval test is INCLUSIVE: `approve * 100 >= decisive * threshold_pc` where
+ *     it used to be `>`, plus an explicit `decisive > 0` guard so a consultation with no
+ *     decisive vote is not approved by `0 >= 0`. No shape change from v19.
  *
- * Nothing here GATES on the number — verification is driven by field presence, so a v14 document
- * (no register, no flags, no published quantile) takes the absent-means-default path on each and
- * verifies byte-identically to how it did before v15 existed. The constant is here to state
- * which revision the field set below tracks, not to refuse the previous one.
+ * No document is REFUSED for its version. Verification is driven by field presence, so one
+ * written before any of these takes the absent-means-default path on each field and verifies
+ * byte-identically to how it did before that version existed. The constant states which revision
+ * the field set below tracks, not which ones it turns away.
+ *
+ * The v19→v20 change is the one thing field presence cannot express, because it is a COMPARISON
+ * rather than a field — so the version number itself is read, and only for that. See
+ * `approvalBarIsInclusive` in `src/verdict.ts`: each document's `approved` is recomputed under
+ * the comparison in force when it was settled, exactly as each Majority Judgment result is
+ * recomputed at the Grade Quantile it publishes. A verifier that applied today's comparison to
+ * every document would report correct historical tallies as lies.
  */
-export const TALLY_DOC_VERSION = 15;
+export const TALLY_DOC_VERSION = 20;
 
 /** The document could not be read as a tally document at all. Maps to exit 4, distinct from
  * all three verification outcomes: this is about the input, not about the tally. */
@@ -50,7 +73,10 @@ export class DocumentError extends Error {
 export interface TallyVote {
   account: string;
   selection: number[];
-  /** The weight the document CLAIMS this account had. The recomputation replaces it. */
+  /**
+   * The weight the document CLAIMS this account had — its OWN snapshot weight, never including
+   * anything delegated to it. The recomputation replaces it.
+   */
   weight: Dec;
   /**
    * The document's CLAIM that this ballot was barred under the DAO-controlled-funds rule. Like
@@ -58,11 +84,42 @@ export interface TallyVote {
    * own `excluded_accounts` register and compares. Absent (every v14 document) is false.
    */
   excluded: boolean;
+  /**
+   * What OTHER accounts asked this ballot to carry (v18). Present only when the delegation leg
+   * was in force; `null` on any earlier document, and on a barred ballot, which is refused as a
+   * delegate before any weight is assigned — printing a zero there would suggest nobody had
+   * tried.
+   */
+  delegatedWeight: Dec | null;
+  /** `weight + delegated_weight` — what this ballot actually carried (v18). */
+  effectiveWeight: Dec | null;
+}
+
+/** One entry of the document's published `delegations` resolution. */
+export interface PublishedDelegation {
+  delegator: string;
+  delegate: string;
+  /** The DELEGATOR's own snapshot weight — what this delegation was worth, counted or not. */
+  weight: Dec;
+  counted: boolean;
+  reason: DelegationRefusal | null;
 }
 
 export interface TallyDocument {
   /** The document exactly as given, for re-serialization and re-hashing. */
   raw: Json;
+  /**
+   * The document's own `tally_doc_version`.
+   *
+   * Not a gate on whether the document is verifiable — every version this tool has ever handled
+   * still verifies, and the field set is read by presence. It is carried for the one rule that
+   * a field's presence cannot express: which approval comparison the `approved` figure was
+   * settled under. See `approvalBarIsInclusive` in `src/verdict.ts`.
+   *
+   * `null` when the document publishes none, which pins the recomputation to the pre-v20
+   * comparison rather than to the current one.
+   */
+  tallyDocVersion: number | null;
   consultationId: string;
   kind: string;
   snapshotStateVersion: number;
@@ -75,7 +132,27 @@ export interface TallyDocument {
    * also what an absent field (any v14 document) means.
    */
   excludedAccounts: string[];
+  /**
+   * The ON-LEDGER versions of the register and the bar that the consultation registry pinned on
+   * this consultation at creation (v19).
+   *
+   * Carried, not recomputed. Their job is to let someone fetch those two sets by version from
+   * the registry and check that the lists this document EMBEDS are the ones it claims — a check
+   * that needs the registry, not the Gateway state endpoints this tool reads. `null` on any
+   * document written before v19.
+   */
+  weightSetVersion: number | null;
+  excludedSetVersion: number | null;
   votes: TallyVote[];
+  /**
+   * The delegations in force at the snapshot (v18) — a trusted input, `null` when the leg was
+   * off. See `src/delegation.ts`.
+   */
+  delegationInput: SnapshotDelegation[] | null;
+  /** The published resolution (v18) — a claim, recomputed and compared. `null` when off. */
+  delegations: PublishedDelegation[] | null;
+  /** Total weight that reached a ballot by delegation (v18). `null` when off. */
+  delegatedWeightTotal: Dec | null;
   totals: Dec[];
   totalWeight: Dec;
   abstainWeight: Dec;
@@ -145,6 +222,16 @@ function optDec(doc: Record<string, unknown>, field: string): Dec | null {
   }
 }
 
+/** An integer field that arrived in a later version: absent is `null`, not an error. */
+function optInt(doc: Record<string, unknown>, field: string): number | null {
+  const v = doc[field];
+  if (v === null || v === undefined) return null;
+  if (typeof v !== "number" || !Number.isSafeInteger(v)) {
+    fail(field, "is neither absent nor a safe integer");
+  }
+  return v;
+}
+
 function reqInt(doc: Record<string, unknown>, field: string): number {
   const v = doc[field];
   if (typeof v !== "number" || !Number.isSafeInteger(v)) {
@@ -206,34 +293,165 @@ function parseWeightSources(raw: unknown): WeightSources {
     }
   })();
 
+  const out: WeightSources = { native_pools: nativePools };
+
   // The LSULP leg (tally document v16). ABSENT means off — a v15 document, or a v16 register
   // that never enabled it, verifies identically. Serialized only when named, so its presence
   // always carries the exact pair.
   const lsulpRaw = ws["lsulp"];
-  if (lsulpRaw === undefined || lsulpRaw === null) {
-    return { native_pools: nativePools };
+  if (lsulpRaw !== undefined && lsulpRaw !== null) {
+    const lp = asObject(lsulpRaw);
+    const lpMode = asString(lp["mode"]) ?? "";
+    switch (lpMode) {
+      case "off":
+        break;
+      case "component": {
+        const component = asString(lp["component"]);
+        const resource = asString(lp["resource"]);
+        if (component === null || component === "") {
+          fail("weight_sources.lsulp.component", "is missing or not a string");
+        }
+        if (resource === null || resource === "") {
+          fail("weight_sources.lsulp.resource", "is missing or not a string");
+        }
+        out.lsulp = { mode: "component", component, resource };
+        break;
+      }
+      default:
+        // Same discipline as native_pools: an unknown mode is an error. There is deliberately
+        // no discovery mode — the pair is named or the leg is off.
+        fail("weight_sources.lsulp.mode", `has unknown mode ${JSON.stringify(lpMode)}`);
+    }
   }
-  const lp = asObject(lsulpRaw);
-  const lpMode = asString(lp["mode"]) ?? "";
-  switch (lpMode) {
+
+  // The two concentrated-liquidity legs (v17). Same shape as each other and same discipline as
+  // the LSULP leg: absent is off, named-or-off is the only pair of options, an unknown mode is
+  // an error rather than a fallback.
+  const precision = parseConcentratedLeg(ws["precision_pools"], "precision_pools");
+  if (precision !== null) out.precision_pools = precision;
+  const shape = parseConcentratedLeg(ws["shape_pools"], "shape_pools");
+  if (shape !== null) out.shape_pools = shape;
+
+  // The delegation leg (v18). ONE named component or nothing — a second register would be a
+  // second answer to the question of who casts an account's weight.
+  const delegationRaw = ws["delegation"];
+  if (delegationRaw !== undefined && delegationRaw !== null) {
+    const dl = asObject(delegationRaw);
+    const dlMode = asString(dl["mode"]) ?? "";
+    switch (dlMode) {
+      case "off":
+        break;
+      case "component": {
+        const component = asString(dl["component"]);
+        if (component === null || component === "") {
+          fail("weight_sources.delegation.component", "is missing or not a string");
+        }
+        out.delegation = { mode: "component", component };
+        break;
+      }
+      default:
+        fail("weight_sources.delegation.mode", `has unknown mode ${JSON.stringify(dlMode)}`);
+    }
+  }
+
+  return out;
+}
+
+/** One concentrated-liquidity leg of the register: absent/off, or an allowlist of components. */
+function parseConcentratedLeg(raw: unknown, name: string): ConcentratedPoolSources | null {
+  if (raw === undefined || raw === null) return null;
+  const o = asObject(raw);
+  const mode = asString(o["mode"]) ?? "";
+  switch (mode) {
     case "off":
-      return { native_pools: nativePools };
-    case "component": {
-      const component = asString(lp["component"]);
-      const resource = asString(lp["resource"]);
-      if (component === null || component === "") {
-        return fail("weight_sources.lsulp.component", "is missing or not a string");
-      }
-      if (resource === null || resource === "") {
-        return fail("weight_sources.lsulp.resource", "is missing or not a string");
-      }
-      return { native_pools: nativePools, lsulp: { mode: "component", component, resource } };
+      return null;
+    case "allowlist": {
+      const pools = asArray(o["pools"]).map((p) => {
+        const s = asString(p);
+        if (s === null) fail(`weight_sources.${name}.pools`, "contains a non-string");
+        return s;
+      });
+      return { mode: "allowlist", pools };
     }
     default:
-      // Same discipline as native_pools: an unknown mode is an error. There is deliberately
-      // no discovery mode — the pair is named or the leg is off.
-      return fail("weight_sources.lsulp.mode", `has unknown mode ${JSON.stringify(lpMode)}`);
+      // There is deliberately no discovery mode for these: a position's value is the output of a
+      // formula over state fields the component reports about itself, and both halves of its
+      // metadata round trip live in address spaces anyone may occupy.
+      return fail(`weight_sources.${name}.mode`, `has unknown mode ${JSON.stringify(mode)}`);
   }
+}
+
+/**
+ * The delegations IN FORCE at the snapshot — the document's `delegation_input`.
+ *
+ * `null` when the leg was off, which a reader must be able to tell from `[]` ("the leg was on
+ * and nobody had delegated"). A TRUSTED INPUT, not a recomputation: see `src/delegation.ts` on
+ * why the snapshot half of the leg is not derivable from Gateway historical state.
+ */
+function parseDelegationInput(raw: unknown): SnapshotDelegation[] | null {
+  if (raw === null || raw === undefined) return null;
+  if (!Array.isArray(raw)) fail("delegation_input", "is neither null nor an array");
+  return raw.map((entry, i) => {
+    const o = asObject(entry);
+    const delegator = asString(o["delegator"]);
+    const delegate = asString(o["delegate"]);
+    if (delegator === null) fail(`delegation_input[${i}].delegator`, "is missing or not a string");
+    if (delegate === null) fail(`delegation_input[${i}].delegate`, "is missing or not a string");
+    const declined = o["delegate_declined"];
+    if (typeof declined !== "boolean") {
+      fail(`delegation_input[${i}].delegate_declined`, "is missing or not a boolean");
+    }
+    return { delegator, delegate, delegateDeclined: declined };
+  });
+}
+
+/**
+ * The RESOLUTION the document publishes: every delegation in force, whether it counted, and why
+ * not. Unlike `delegation_input` this is a CLAIM — it is recomputed from the input, the ballots
+ * and the bar, and compared entry by entry.
+ */
+function parseDelegations(raw: unknown): PublishedDelegation[] | null {
+  if (raw === null || raw === undefined) return null;
+  if (!Array.isArray(raw)) fail("delegations", "is neither null nor an array");
+  return raw.map((entry, i) => {
+    const o = asObject(entry);
+    const delegator = asString(o["delegator"]);
+    const delegate = asString(o["delegate"]);
+    if (delegator === null) fail(`delegations[${i}].delegator`, "is missing or not a string");
+    if (delegate === null) fail(`delegations[${i}].delegate`, "is missing or not a string");
+    const weightStr = asString(o["weight"]);
+    if (weightStr === null) fail(`delegations[${i}].weight`, "is missing or not a Decimal string");
+    let weight: Dec;
+    try {
+      weight = Dec.parse(weightStr);
+    } catch (e) {
+      fail(
+        `delegations[${i}].weight`,
+        `is not a canonical Decimal: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+    const countedRaw = o["counted"];
+    if (typeof countedRaw !== "boolean") {
+      fail(`delegations[${i}].counted`, "is missing or not a boolean");
+    }
+    const reasonRaw = o["reason"];
+    if (reasonRaw !== null && reasonRaw !== undefined && typeof reasonRaw !== "string") {
+      fail(`delegations[${i}].reason`, "is neither null nor a string");
+    }
+    const reason = typeof reasonRaw === "string" ? reasonRaw : null;
+    // The tokens are a closed set the reference implementation publishes. An unrecognised one is
+    // refused rather than carried: comparing against a string nobody emits would silently pass.
+    if (reason !== null && !(DELEGATION_REFUSALS as readonly string[]).includes(reason)) {
+      fail(`delegations[${i}].reason`, `has unknown refusal token ${JSON.stringify(reason)}`);
+    }
+    return {
+      delegator,
+      delegate,
+      weight,
+      counted: countedRaw,
+      reason: reason as DelegationRefusal | null,
+    };
+  });
 }
 
 /**
@@ -371,7 +589,24 @@ export function parseTallyDocument(input: unknown): { doc: TallyDocument; envelo
     if (excludedRaw !== undefined && excludedRaw !== null && typeof excludedRaw !== "boolean") {
       fail(`votes[${i}].excluded`, "is neither absent nor a boolean");
     }
-    return { account: account as string, selection, weight, excluded: excludedRaw === true };
+    // v18: the own/delegated split. Both present or both absent — the reference implementation
+    // writes them together, so one without the other is a document nobody can have produced.
+    const delegatedWeight = optDec(o, "delegated_weight");
+    const effectiveWeight = optDec(o, "effective_weight");
+    if ((delegatedWeight === null) !== (effectiveWeight === null)) {
+      fail(
+        `votes[${i}]`,
+        "carries exactly one of delegated_weight and effective_weight — they are written together",
+      );
+    }
+    return {
+      account: account as string,
+      selection,
+      weight,
+      excluded: excludedRaw === true,
+      delegatedWeight,
+      effectiveWeight,
+    };
   });
 
   const snapshotStateVersion = reqInt(raw, "snapshot_state_version");
@@ -384,12 +619,18 @@ export function parseTallyDocument(input: unknown): { doc: TallyDocument; envelo
 
   const doc: TallyDocument = {
     raw: raw as Json,
+    tallyDocVersion: optInt(raw, "tally_doc_version"),
     consultationId: reqString(raw, "consultation_id"),
     kind,
     snapshotStateVersion,
     weightSources: parseWeightSources(raw["weight_sources"]),
     excludedAccounts: parseExcludedAccounts(raw["excluded_accounts"]),
+    weightSetVersion: optInt(raw, "weight_set_version"),
+    excludedSetVersion: optInt(raw, "excluded_set_version"),
     votes,
+    delegationInput: parseDelegationInput(raw["delegation_input"]),
+    delegations: parseDelegations(raw["delegations"]),
+    delegatedWeightTotal: optDec(raw, "delegated_weight_total"),
     totals,
     totalWeight: reqDec(raw, "total_weight"),
     abstainWeight: reqDec(raw, "abstain_weight"),

@@ -40,6 +40,64 @@ export interface GatewayClient {
   entityFungiblesPage(address: string, cursor: string, stateVersion: number): Promise<unknown>;
   /** POST /state/validators/list, cursor-paginated. */
   validatorsList(stateVersion: number, cursor: string | null): Promise<unknown>;
+
+  /* ---- the concentrated-liquidity legs (tally document v17) ----------------
+   * Six more endpoints, because a position is a NON-FUNGIBLE and none of the three above can
+   * see one. Every leg before v17 valued a balance, which the fungible endpoints report; a
+   * concentrated-liquidity position's value is a formula over the pool's state fields and the
+   * position's own NFT data, so the read path is per-account ids, per-position data, per-pool
+   * vault resources, and a key-value-store walk of each shape pool's bin map.
+   */
+
+  /**
+   * POST /state/entity/details at `aggregation_level: "Vault"`, which is the only shape that
+   * reports a component's vault ADDRESSES. A pool's two token resources are learned from them:
+   * the component's state names its vaults, and the engine says what each vault holds.
+   */
+  entityDetailsVault(addresses: string[], stateVersion: number): Promise<unknown>;
+  /**
+   * POST /state/entity/page/non-fungibles at Vault aggregation with
+   * `non_fungible_include_nfids` — the only shape that hands back actual local ids; Global
+   * aggregation reports counts only.
+   */
+  entityNonFungiblesPage(
+    address: string,
+    cursor: string | null,
+    stateVersion: number,
+  ): Promise<unknown>;
+  /** POST /state/entity/page/non-fungible-vaults — spends a per-RESOURCE vault cursor. */
+  entityNonFungibleVaultsPage(
+    address: string,
+    resource: string,
+    cursor: string,
+    stateVersion: number,
+  ): Promise<unknown>;
+  /** POST /state/entity/page/non-fungible-vault/ids — spends a per-VAULT id cursor. */
+  entityNonFungibleVaultIdsPage(
+    address: string,
+    resource: string,
+    vaultAddress: string,
+    cursor: string,
+    stateVersion: number,
+  ): Promise<unknown>;
+  /**
+   * POST /state/non-fungible/data. The historical read is mandatory rather than preferable: a
+   * position closed between the snapshot and now reports `is_burned` with no `data` at the tip,
+   * so a tip read silently zeroes every position that has since been withdrawn.
+   */
+  nonFungibleData(resource: string, ids: string[], stateVersion: number): Promise<unknown>;
+  /** POST /state/key-value-store/keys — the bin map's keys, paged. */
+  keyValueStoreKeys(
+    kvsAddress: string,
+    cursor: string | null,
+    stateVersion: number,
+  ): Promise<unknown>;
+  /** POST /state/key-value-store/data — the values behind named bin-map keys. */
+  keyValueStoreData(
+    kvsAddress: string,
+    keys: unknown[],
+    stateVersion: number,
+  ): Promise<unknown>;
 }
 
 export class RadixGateway implements GatewayClient {
@@ -115,6 +173,89 @@ export class RadixGateway implements GatewayClient {
     };
     if (cursor !== null) payload["cursor"] = cursor;
     return this.post("/state/validators/list", payload);
+  }
+
+  entityDetailsVault(addresses: string[], stateVersion: number): Promise<unknown> {
+    return this.post("/state/entity/details", {
+      addresses,
+      aggregation_level: "Vault",
+      at_ledger_state: { state_version: stateVersion },
+    });
+  }
+
+  entityNonFungiblesPage(
+    address: string,
+    cursor: string | null,
+    stateVersion: number,
+  ): Promise<unknown> {
+    const payload: Record<string, unknown> = {
+      address,
+      aggregation_level: "Vault",
+      opt_ins: { non_fungible_include_nfids: true },
+      at_ledger_state: { state_version: stateVersion },
+    };
+    if (cursor !== null) payload["cursor"] = cursor;
+    return this.post("/state/entity/page/non-fungibles", payload);
+  }
+
+  entityNonFungibleVaultsPage(
+    address: string,
+    resource: string,
+    cursor: string,
+    stateVersion: number,
+  ): Promise<unknown> {
+    return this.post("/state/entity/page/non-fungible-vaults", {
+      address,
+      resource_address: resource,
+      cursor,
+      opt_ins: { non_fungible_include_nfids: true },
+      at_ledger_state: { state_version: stateVersion },
+    });
+  }
+
+  entityNonFungibleVaultIdsPage(
+    address: string,
+    resource: string,
+    vaultAddress: string,
+    cursor: string,
+    stateVersion: number,
+  ): Promise<unknown> {
+    return this.post("/state/entity/page/non-fungible-vault/ids", {
+      address,
+      resource_address: resource,
+      vault_address: vaultAddress,
+      cursor,
+      at_ledger_state: { state_version: stateVersion },
+    });
+  }
+
+  nonFungibleData(resource: string, ids: string[], stateVersion: number): Promise<unknown> {
+    return this.post("/state/non-fungible/data", {
+      resource_address: resource,
+      non_fungible_ids: ids,
+      at_ledger_state: { state_version: stateVersion },
+    });
+  }
+
+  keyValueStoreKeys(
+    kvsAddress: string,
+    cursor: string | null,
+    stateVersion: number,
+  ): Promise<unknown> {
+    const payload: Record<string, unknown> = {
+      key_value_store_address: kvsAddress,
+      at_ledger_state: { state_version: stateVersion },
+    };
+    if (cursor !== null) payload["cursor"] = cursor;
+    return this.post("/state/key-value-store/keys", payload);
+  }
+
+  keyValueStoreData(kvsAddress: string, keys: unknown[], stateVersion: number): Promise<unknown> {
+    return this.post("/state/key-value-store/data", {
+      key_value_store_address: kvsAddress,
+      keys,
+      at_ledger_state: { state_version: stateVersion },
+    });
   }
 }
 

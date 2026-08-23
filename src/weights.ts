@@ -12,22 +12,43 @@
  *                       unit_balance × pool_xrd_backing ÷ unit_total_supply
  *                   + (v16, when the register names an lsulp pair):
  *                       lsulp_balance × dex_valuation_xrd ÷ lsulp_total_supply
+ *                   + (v17, when the register names precision_pools):
+ *                       Σ over Ociswap PrecisionPool positions held: the XRD value of the
+ *                       position's PRINCIPAL, from the tick formula in src/concentrated.ts
+ *                   + (v17, when the register names shape_pools):
+ *                       Σ over CaviarNine QuantaSwap receipts held: the XRD value of the
+ *                       receipt's bin claims
  *
  * where a pool's XRD backing is its own XRD vault plus its LSUs converted by the same rule,
  * plus any register-named LSULP it holds at the same lsulp rate.
  * Which pool units count is governed by the document's own `weight_sources` register — this
  * module reads the register from the document and applies it; it has no rule of its own.
  *
- * Two bounds are inherited from the reference rule and kept deliberately, because both fail
- * toward under-counting rather than over-counting: pool units held BY a pool are not followed
- * (one level only), and non-fungible liquidity positions are not counted at all — a position
- * NFT's backing is not readable from balances alone.
+ * One bound is inherited from the reference rule and kept deliberately, because it fails toward
+ * under-counting rather than over-counting: pool units and liquidity positions held BY a pool
+ * are not followed (one level only).
  *
- * All arithmetic is src/decimal.ts — scrypto Decimal, truncating division, no floats. The
- * conversions divide, and the eighteenth decimal place of a redemption rate is exactly where
- * a float would lie.
+ * The other bound v4-v16 carried — "non-fungible liquidity positions are not counted at all" —
+ * is REVOKED at v17 for the two named legs, and only for them. A position of a pool the register
+ * does not name still counts for nothing, and accrued fees stay uncounted everywhere.
+ *
+ * All arithmetic is src/decimal.ts — scrypto Decimal, truncating division, no floats — except
+ * the tick power and removable-amount formula, which the rule evaluates in scrypto
+ * PreciseDecimal (36 places, src/precise.ts) before narrowing back down. The conversions divide,
+ * and the eighteenth decimal place of a redemption rate is exactly where a float would lie.
  */
 
+import {
+  WeightRuleError,
+  fetchPositionDataAt,
+  fetchPositionIdsAt,
+  fetchPrecisionPoolsAt,
+  fetchShapePoolsAt,
+  parseLiquidityClaims,
+  parseLiquidityPosition,
+  precisionPositionXrd,
+  shapeClaimsXrd,
+} from "./concentrated.ts";
 import { Dec } from "./decimal.ts";
 import { GatewayError, asArray, asObject, asString } from "./gateway.ts";
 import type { GatewayClient } from "./gateway.ts";
@@ -65,10 +86,52 @@ export type LsulpSource =
   | { mode: "off" }
   | { mode: "component"; component: string; resource: string };
 
+/**
+ * The two CONCENTRATED-LIQUIDITY legs (tally document v17): Ociswap `PrecisionPool` and
+ * CaviarNine `QuantaSwap`. One type serves both because the register's decision is identical
+ * for them — which pool COMPONENTS count. Everything else about a pool (its position resource,
+ * its two token resources, its price or bin state) is read off the ledger at the snapshot.
+ *
+ * Named-or-off, with no discovery mode, for the LSULP reason one step stronger: a position's
+ * value is not a pro-rata share of a vault balance but the OUTPUT OF A FORMULA over state fields
+ * the component reports about itself, and both halves of the metadata round trip live in the
+ * ordinary `component_`/`resource_` address spaces which anyone may occupy — so a mutual link
+ * there shows only that one author wrote both halves.
+ */
+export type ConcentratedPoolSources =
+  | { mode: "off" }
+  | { mode: "allowlist"; pools: string[] };
+
+/**
+ * The DELEGATION leg (tally document v18): the component whose records say which account may
+ * cast which other account's weight.
+ *
+ * Named-or-off, and only ever ONE component: a second register would be a second answer to the
+ * question of who casts an account's weight, and the rule has no way to prefer one.
+ *
+ * This verifier carries the register entry but does not re-read the component's history — see
+ * the delegation note in `src/delegation.ts` and the README's coverage table for exactly which
+ * half of the leg is recomputed and which is a trusted input.
+ */
+export type DelegationSource =
+  | { mode: "off" }
+  | { mode: "component"; component: string };
+
 export interface WeightSources {
   native_pools: NativePoolSources;
   /** Absent = off — v15 documents (and v16 documents that never enabled the leg) verify identically. */
   lsulp?: LsulpSource;
+  /** Absent = off (v17). */
+  precision_pools?: ConcentratedPoolSources;
+  /** Absent = off (v17). */
+  shape_pools?: ConcentratedPoolSources;
+  /** Absent = off (v18). */
+  delegation?: DelegationSource;
+}
+
+/** The components a concentrated-liquidity leg names, or none when it is off or absent. */
+export function concentratedPools(leg: ConcentratedPoolSources | undefined): string[] {
+  return leg !== undefined && leg.mode === "allowlist" ? leg.pools : [];
 }
 
 /** What a held fungible turns out to be once looked up at the snapshot. */
@@ -77,6 +140,13 @@ export interface ResourceInfo {
   /** The pool this resource CLAIMS to be the unit of. Only a claim — metadata is set by
    * whoever created the resource. `verifiedPoolUnits` is what turns it into a fact. */
   pool: string | null;
+  /**
+   * Decimal places the resource itself declares (engine state, not metadata). Only the
+   * concentrated-liquidity legs use it, to truncate a computed token amount the way the amount
+   * would be truncated if it were actually withdrawn. `null` for anything the Gateway reports
+   * no divisibility for, which is every non-fungible.
+   */
+  divisibility: number | null;
 }
 
 type Balances = Map<string, Dec>; // resource -> amount
@@ -212,8 +282,16 @@ async function fetchResourceInfoAt(
     for (const item of asArray(resp["items"])) {
       const o = asObject(item);
       const address = asString(o["address"]) ?? "";
-      const supply = asString(asObject(o["details"])["total_supply"]) ?? "0";
-      out.set(address, { totalSupply: Dec.parse(supply), pool: metadataLink(o, "pool") });
+      const details = asObject(o["details"]);
+      const supply = asString(details["total_supply"]) ?? "0";
+      const rawDiv = details["divisibility"];
+      const divisibility =
+        typeof rawDiv === "number" && Number.isSafeInteger(rawDiv) && rawDiv >= 0 ? rawDiv : null;
+      out.set(address, {
+        totalSupply: Dec.parse(supply),
+        pool: metadataLink(o, "pool"),
+        divisibility,
+      });
     }
   }
   return out;
@@ -393,8 +471,27 @@ export async function computeAccountWeights(
     ? new Map<string, Balances>()
     : await fetchFungiblesAt(gw, pools, snapshotStateVersion);
 
+  // The concentrated-liquidity legs (v17), when the register names components. Resolved BEFORE
+  // the supply lookup below, because a named pool's token resources join the set whose supply
+  // and divisibility have to be known — a pool may pair an LSU no voter holds directly.
+  const precisionPools = await fetchPrecisionPoolsAt(
+    gw,
+    concentratedPools(sources.precision_pools),
+    snapshotStateVersion,
+  );
+  const shapePools = await fetchShapePoolsAt(
+    gw,
+    concentratedPools(sources.shape_pools),
+    snapshotStateVersion,
+  );
+  const concentratedTokens = new Set<string>();
+  for (const p of [...precisionPools, ...shapePools]) {
+    if (!heldInfo.has(p.tokenX)) concentratedTokens.add(p.tokenX);
+    if (!heldInfo.has(p.tokenY)) concentratedTokens.add(p.tokenY);
+  }
+
   // A pool may hold LSUs the voters do not hold directly, so their supplies are a second lookup.
-  const poolLsus = new Set<string>();
+  const poolLsus = new Set<string>(concentratedTokens);
   for (const balances of poolBalances.values()) {
     for (const resource of balances.keys()) {
       if (lsuMap.has(resource) && !heldInfo.has(resource)) poolLsus.add(resource);
@@ -403,6 +500,15 @@ export async function computeAccountWeights(
   const poolLsuInfo = await fetchResourceInfoAt(gw, [...poolLsus], snapshotStateVersion);
   const supplyOf = (resource: string): Dec | null =>
     heldInfo.get(resource)?.totalSupply ?? poolLsuInfo.get(resource)?.totalSupply ?? null;
+  // The ENTRY is resolved first, then its divisibility read off it — not
+  // `held?.divisibility ?? pool?.divisibility`, which would fall through to the second map when
+  // the first knows the resource but reports no divisibility. Those are different answers: the
+  // first says "this resource declares none", and reading a divisibility from somewhere else
+  // would truncate a computed amount by a figure that belongs to a different lookup.
+  const divisibilityOf = (resource: string): number | null => {
+    const info = heldInfo.get(resource) ?? poolLsuInfo.get(resource);
+    return info?.divisibility ?? null;
+  };
 
   // XRD backing per pool: its own XRD vault plus any LSUs it holds, converted by the same
   // rule — plus any register-named LSULP it holds, at the same rate as directly-held LSULP.
@@ -414,6 +520,39 @@ export async function computeAccountWeights(
       backing = backing.add(lsulpValue(resource, amount));
     }
     poolBacking.set(pool, backing);
+  }
+
+  // How one token amount out of a concentrated-liquidity position becomes XRD: the SAME three
+  // recognitions the rest of the rule uses — XRD at par, a validator stake unit at its
+  // redemption rate, the registered LSULP at `lsulp_rate` — and everything else at zero.
+  // Nothing new is credited here; only a new way of arriving at a token amount.
+  const valueInXrd = (resource: string, amount: Dec): Dec => {
+    if (resource === xrdResource) return amount;
+    return lsuValue(resource, amount, lsuMap, supplyOf).add(lsulpValue(resource, amount));
+  };
+
+  // Which position ids each account held, and what each position said — both at the snapshot,
+  // both fetched ONCE per resource rather than per account.
+  const positionResources = new Set<string>(
+    [...precisionPools, ...shapePools].map((p) => p.positionResource),
+  );
+  const heldPositions = await fetchPositionIdsAt(
+    gw,
+    accounts,
+    positionResources,
+    snapshotStateVersion,
+  );
+  const positionData = new Map<string, Map<string, unknown>>();
+  for (const resource of positionResources) {
+    const ids = new Set<string>();
+    for (const byResource of heldPositions.values()) {
+      for (const id of byResource.get(resource) ?? []) ids.add(id);
+    }
+    if (ids.size === 0) continue;
+    positionData.set(
+      resource,
+      await fetchPositionDataAt(gw, resource, [...ids], snapshotStateVersion),
+    );
   }
 
   for (const account of accounts) {
@@ -429,6 +568,43 @@ export async function computeAccountWeights(
         if (backing !== undefined && supply !== null && supply.isPositive()) {
           weight = weight.add(amount.mul(backing).div(supply));
         }
+      }
+    }
+
+    // v17: the account's concentrated-liquidity positions. A position id with no data at the
+    // snapshot was burned by then (or never existed) and contributes zero; a position that IS
+    // there but does not parse is a refusal, not a zero, because a position we cannot read is
+    // not a position worth nothing.
+    const positionsOf = (resource: string): string[] =>
+      heldPositions.get(account)?.get(resource) ?? [];
+    for (const pool of precisionPools) {
+      const data = positionData.get(pool.positionResource);
+      for (const id of positionsOf(pool.positionResource)) {
+        const raw = data?.get(id);
+        if (raw === undefined) continue;
+        const position = parseLiquidityPosition(raw);
+        if (position === null) {
+          throw new WeightRuleError(
+            `precision pool ${pool.component}: position ${id} does not carry a readable ` +
+              `liquidity/left_bound/right_bound at sv ${snapshotStateVersion}`,
+          );
+        }
+        weight = weight.add(precisionPositionXrd(position, pool, divisibilityOf, valueInXrd));
+      }
+    }
+    for (const pool of shapePools) {
+      const data = positionData.get(pool.positionResource);
+      for (const id of positionsOf(pool.positionResource)) {
+        const raw = data?.get(id);
+        if (raw === undefined) continue;
+        const claims = parseLiquidityClaims(raw);
+        if (claims === null) {
+          throw new WeightRuleError(
+            `shape pool ${pool.component}: receipt ${id} does not carry readable ` +
+              `liquidity_claims at sv ${snapshotStateVersion}`,
+          );
+        }
+        weight = weight.add(shapeClaimsXrd(claims, pool, valueInXrd));
       }
     }
     weights.set(account, weight);

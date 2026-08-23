@@ -91,8 +91,8 @@ test("the register gates a genuine pool unit: off counts none, an allowlist only
 
 test("verifiedPoolUnits requires both directions of the link", () => {
   const held = new Map([
-    [POOL_UNIT, { totalSupply: Dec.fromInt(100n), pool: POOL }],
-    [IMPOSTOR, { totalSupply: Dec.fromInt(999999n), pool: POOL }],
+    [POOL_UNIT, { totalSupply: Dec.fromInt(100n), pool: POOL, divisibility: 18 }],
+    [IMPOSTOR, { totalSupply: Dec.fromInt(999999n), pool: POOL, divisibility: 18 }],
   ]);
   const declared = new Map([[POOL, POOL_UNIT]]);
   const verified = verifiedPoolUnits(held, declared, { mode: "all" });
@@ -103,7 +103,7 @@ test("verifiedPoolUnits requires both directions of the link", () => {
   // answers pool_unit correctly — only the engine's pool blueprints allocate pool_ addresses.
   const fakePool = "component_rdx1fake000000000000000000000000000000000000000000006";
   const spoofed = verifiedPoolUnits(
-    new Map([[IMPOSTOR, { totalSupply: Dec.fromInt(1n), pool: fakePool }]]),
+    new Map([[IMPOSTOR, { totalSupply: Dec.fromInt(1n), pool: fakePool, divisibility: 18 }]]),
     new Map([[fakePool, IMPOSTOR]]),
     { mode: "all" },
   );
@@ -111,7 +111,7 @@ test("verifiedPoolUnits requires both directions of the link", () => {
 });
 
 test("an allowlist entry is not a bypass: a spoofed unit of a listed pool still fails", () => {
-  const held = new Map([[IMPOSTOR, { totalSupply: Dec.fromInt(1n), pool: POOL }]]);
+  const held = new Map([[IMPOSTOR, { totalSupply: Dec.fromInt(1n), pool: POOL, divisibility: 18 }]]);
   const declared = new Map([[POOL, POOL_UNIT]]);
   const verified = verifiedPoolUnits(held, declared, { mode: "allowlist", pools: [POOL] });
   assert.equal(verified.size, 0);

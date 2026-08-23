@@ -13,6 +13,7 @@
 
 import { canonicalize, tallyHash } from "./canonical.ts";
 import type { Json } from "./canonical.ts";
+import { WeightRuleError } from "./concentrated.ts";
 import { Dec } from "./decimal.ts";
 import { DocumentError, parseTallyDocument } from "./document.ts";
 import type { TallyDocument } from "./document.ts";
@@ -80,7 +81,70 @@ export function compareFigures(doc: TallyDocument, derived: DerivedFigures): Dif
       String(vote.excluded),
       String(derived.voteExcluded[i] ?? false),
     );
+    // v18: the own/delegated split. `weight` above stays the account's OWN weight — publishing
+    // the combined figure under that name would let a delegator's balance be re-read as the
+    // delegate's on any later run — so the carried total is a separate pair of fields.
+    check(
+      `votes[${i}].delegated_weight (${vote.account})`,
+      dec(vote.delegatedWeight),
+      dec(derived.voteDelegatedWeight[i] ?? null),
+    );
+    check(
+      `votes[${i}].effective_weight (${vote.account})`,
+      dec(vote.effectiveWeight),
+      dec(derived.voteEffectiveWeight[i] ?? null),
+    );
   }
+
+  // v18: the delegation resolution. Compared entry by entry rather than as one blob, so a
+  // disagreement names the delegation it is about — including WHICH condition the two
+  // implementations disagreed that a delegation failed, which is the thing a reader acts on.
+  const docDelegations = doc.delegations;
+  const derivedDelegations = derived.delegations;
+  if ((docDelegations === null) !== (derivedDelegations === null)) {
+    check(
+      "delegations",
+      docDelegations === null ? "null" : `[${docDelegations.length} entries]`,
+      derivedDelegations === null ? "null" : `[${derivedDelegations.length} entries]`,
+    );
+  } else if (docDelegations !== null && derivedDelegations !== null) {
+    const n = Math.max(docDelegations.length, derivedDelegations.length);
+    for (let i = 0; i < n; i++) {
+      const d = docDelegations[i];
+      const r = derivedDelegations[i];
+      const rWeight = derived.delegationWeights[i] ?? null;
+      check(
+        `delegations[${i}].delegator`,
+        d === undefined ? "absent" : d.delegator,
+        r === undefined ? "absent" : r.delegator,
+      );
+      check(
+        `delegations[${i}].delegate`,
+        d === undefined ? "absent" : d.delegate,
+        r === undefined ? "absent" : r.delegate,
+      );
+      check(
+        `delegations[${i}].weight`,
+        d === undefined ? "absent" : d.weight.toString(),
+        r === undefined ? "absent" : dec(rWeight),
+      );
+      check(
+        `delegations[${i}].counted`,
+        d === undefined ? "absent" : String(d.counted),
+        r === undefined ? "absent" : String(r.refusal === null),
+      );
+      check(
+        `delegations[${i}].reason`,
+        d === undefined ? "absent" : (d.reason ?? "null"),
+        r === undefined ? "absent" : (r.refusal ?? "null"),
+      );
+    }
+  }
+  check(
+    "delegated_weight_total",
+    dec(doc.delegatedWeightTotal),
+    dec(derived.delegatedWeightTotal),
+  );
 
   const totalsLen = Math.max(doc.totals.length, derived.totals.length);
   for (let i = 0; i < totalsLen; i++) {
@@ -131,7 +195,17 @@ export async function verifyTallyDocument(
 
   let derived: DerivedFigures;
   try {
-    const accounts = doc.votes.map((v) => v.account);
+    // Every account whose weight any published figure depends on: the ballots, plus (v18) every
+    // DELEGATOR in force at the snapshot. A delegator who never voted still has a weight in the
+    // document's `delegations` report and, when the delegation counted, inside a delegate's
+    // effective weight — so omitting them here would recompute those figures as zero and report
+    // an honest document as a lie.
+    const accounts = [
+      ...new Set([
+        ...doc.votes.map((v) => v.account),
+        ...(doc.delegationInput ?? []).map((d) => d.delegator),
+      ]),
+    ];
     const weights = await computeAccountWeights(
       gw,
       accounts,
@@ -152,6 +226,8 @@ export async function verifyTallyDocument(
         excluded: doc.withdrawnExcluded ?? [],
         excludedAccounts: doc.excludedAccounts,
         gradeQuantile: doc.gradeQuantile,
+        delegationInput: doc.delegationInput,
+        tallyDocVersion: doc.tallyDocVersion,
       },
       doc.votes,
       weights,
@@ -159,6 +235,12 @@ export async function verifyTallyDocument(
   } catch (e) {
     if (e instanceof GatewayError) return { kind: "unknown", reason: e.message };
     if (e instanceof DocumentError) return { kind: "malformed", reason: e.message };
+    // The document's own register names something the ledger says it is not, or a position that
+    // IS there cannot be read. Neither an infrastructure failure nor an arithmetic disagreement:
+    // the stated weight rule cannot be applied to the ledger the document pins, so there is no
+    // figure to disagree about. Reported as MALFORMED rather than as a discrepancy, because
+    // calling it a discrepancy would accuse a publisher of arithmetic they never got to do.
+    if (e instanceof WeightRuleError) return { kind: "malformed", reason: e.message };
     throw e;
   }
 

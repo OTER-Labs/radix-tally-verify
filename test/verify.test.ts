@@ -72,6 +72,27 @@ class DeadGateway implements GatewayClient {
   validatorsList(): Promise<unknown> {
     return Promise.reject(new GatewayError("unreachable"));
   }
+  entityDetailsVault(): Promise<unknown> {
+    return Promise.reject(new GatewayError("unreachable"));
+  }
+  entityNonFungiblesPage(): Promise<unknown> {
+    return Promise.reject(new GatewayError("unreachable"));
+  }
+  entityNonFungibleVaultsPage(): Promise<unknown> {
+    return Promise.reject(new GatewayError("unreachable"));
+  }
+  entityNonFungibleVaultIdsPage(): Promise<unknown> {
+    return Promise.reject(new GatewayError("unreachable"));
+  }
+  nonFungibleData(): Promise<unknown> {
+    return Promise.reject(new GatewayError("unreachable"));
+  }
+  keyValueStoreKeys(): Promise<unknown> {
+    return Promise.reject(new GatewayError("unreachable"));
+  }
+  keyValueStoreData(): Promise<unknown> {
+    return Promise.reject(new GatewayError("unreachable"));
+  }
 }
 
 test("a correct document with the correct hash is a MATCH", async () => {

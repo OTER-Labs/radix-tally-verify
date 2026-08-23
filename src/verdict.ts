@@ -21,6 +21,8 @@
  */
 
 import { Dec } from "./decimal.ts";
+import { delegatedWeightByDelegate, resolveDelegations } from "./delegation.ts";
+import type { ResolvedDelegation, SnapshotDelegation } from "./delegation.ts";
 import type { Json } from "./canonical.ts";
 
 /** The five grades of the framework's scale, highest first. Ordinal 0 is Excellent, 4 is
@@ -115,6 +117,22 @@ export interface VerdictSpec {
    * difference.
    */
   gradeQuantile: GradeQuantile | null;
+  /**
+   * The delegations in force at the snapshot — the document's `delegation_input` (v18), or
+   * `null` when the leg was off.
+   *
+   * An INPUT, like the ballots: the snapshot half of the delegation leg is a fold over the
+   * delegation component's write history, which the Gateway's historical state endpoints do not
+   * serve. Everything downstream of it — the resolution, the per-delegate sums, and their effect
+   * on every total and on the verdict — is recomputed here. See `src/delegation.ts`.
+   */
+  delegationInput: SnapshotDelegation[] | null;
+  /**
+   * The document's own `tally_doc_version`, which decides WHICH approval comparison its
+   * `approved` was settled under — see {@link approvalBarIsInclusive}. `null` when the document
+   * publishes none, which pins the recomputation to the pre-v20 strict comparison.
+   */
+  tallyDocVersion: number | null;
 }
 
 export interface MjCandidate {
@@ -144,6 +162,22 @@ export interface DerivedFigures {
    * register, so the document's own `excluded` flags can be checked against it rather than
    * believed. */
   voteExcluded: boolean[];
+  /**
+   * Per entry of the document's `votes`, in order: what other accounts asked this ballot to
+   * carry, and what it therefore carried in total (v18).
+   *
+   * `null` on every entry when the delegation leg was off, and `null` on a barred ballot even
+   * when it was on — a barred account is refused as a delegate before any weight is assigned, so
+   * there is never a figure to report there.
+   */
+  voteDelegatedWeight: Array<Dec | null>;
+  voteEffectiveWeight: Array<Dec | null>;
+  /** The recomputed resolution — the document's `delegations` (v18). `null` when the leg was off. */
+  delegations: ResolvedDelegation[] | null;
+  /** The DELEGATOR's own snapshot weight per resolved delegation, in the same order. */
+  delegationWeights: Dec[];
+  /** Total weight that reached a ballot by delegation (v18). `null` when the leg was off. */
+  delegatedWeightTotal: Dec | null;
   quorumMet: boolean;
   masMet: boolean | null;
   approveWeight: Dec | null;
@@ -156,11 +190,54 @@ export interface DerivedFigures {
 }
 
 /**
- * The Binding verdict: quorum (resolved by the caller), the STRICT decisive ratio, and the
- * Minimum Affirmative Support floor. Strictly greater on the ratio, so an exact tie fails;
- * inclusive on the MAS floor, because a floor reached is a floor met. MAS is what keeps the
- * quorum leg honest: quorum counts abstaining weight, so without an affirmative floor a
- * proposal could be carried over quorum by weight that endorsed nothing.
+ * The document version from which the approval bar is AT-OR-ABOVE.
+ *
+ * Through v19 the decisive ratio was compared with a strict `>`; from v20 it is `>=`, with an
+ * explicit `decisive > 0` guard. See {@link bindingApproved} and {@link approvalBarIsInclusive}.
+ */
+export const INCLUSIVE_APPROVAL_BAR_FROM_VERSION = 20;
+
+/**
+ * Which comparison a document's `approved` was settled under — decided by the document, never by
+ * this verifier's own vintage.
+ *
+ * This is the Grade Quantile rule applied to the other moving bar, and for the same reason. A
+ * result must be recomputable under the rule that PRODUCED it, or a verifier reports every
+ * correct historical tally as a lie. A v19 consultation that landed exactly on its bar was
+ * correctly recorded as failing under the rule in force when it was settled; recomputing it with
+ * today's comparison would accuse an honest publisher of arithmetic they never did.
+ *
+ * An ABSENT version is treated as pre-v20 — the conservative reading, and the same one the
+ * absent-quantile path takes. Absence is not a licence to have applied an unannounced newer
+ * rule: it pins the recomputation to the older comparison, and a tally settled under the newer
+ * one without saying so reports as a figure difference.
+ */
+export function approvalBarIsInclusive(tallyDocVersion: number | null): boolean {
+  return tallyDocVersion !== null && tallyDocVersion >= INCLUSIVE_APPROVAL_BAR_FROM_VERSION;
+}
+
+/**
+ * The Binding verdict: quorum (resolved by the caller), the decisive ratio, and the Minimum
+ * Affirmative Support floor.
+ *
+ * **From tally document v20 the ratio comparison is INCLUSIVE.** `approve * 100 >= decisive *
+ * threshold_pc`, where v19 and earlier compared with a strict `>`. The framework's own wording is
+ * at-or-above throughout — the Parameters Registry writes its bars as "≥ 66% / ≥ 60% / ≥ 50%
+ * YES", and the Proposal & Voting Framework says a proposal passes when it MEETS the approval
+ * threshold. Under the strict comparison a 100 bar was unreachable even by unanimity and an exact
+ * tie at a 50 bar failed, neither of which is what the bar says.
+ *
+ * The inclusive test needs a guard the strict one did not: with no decisive vote at all, `0 >= 0`
+ * is true and every abstention-only consultation would pass its ratio. So `decisive > 0` is an
+ * explicit condition under the inclusive comparison, and it is the reason a quorate all-abstain
+ * consultation is not approved. Under the strict comparison it is unnecessary — `0 > 0` is false
+ * — and applying it there would change no answer, but it is kept out of that branch so each
+ * comparison is exactly the rule its documents were settled under.
+ *
+ * MAS was always inclusive, because a floor reached is a floor met. It is what keeps the quorum
+ * leg honest: quorum counts abstaining weight, so without an affirmative floor a proposal could
+ * be carried over quorum by weight that endorsed nothing and then pass on a negligible
+ * affirmative base.
  */
 export function bindingApproved(
   approve: Dec,
@@ -168,13 +245,13 @@ export function bindingApproved(
   thresholdPc: Dec,
   mas: Dec,
   quorumMet: boolean,
+  inclusive: boolean,
 ): boolean {
   const decisive = approve.add(reject);
-  return (
-    quorumMet &&
-    approve.mul(Dec.fromInt(100)).gt(decisive.mul(thresholdPc)) &&
-    approve.gte(mas)
-  );
+  const ratio = inclusive
+    ? decisive.isPositive() && approve.mul(Dec.fromInt(100)).gte(decisive.mul(thresholdPc))
+    : approve.mul(Dec.fromInt(100)).gt(decisive.mul(thresholdPc));
+  return quorumMet && ratio && approve.gte(mas);
 }
 
 /**
@@ -471,16 +548,50 @@ export function deriveFigures(
 
   const barred = new Set(spec.excludedAccounts);
   const voteExcluded: boolean[] = [];
+  const voteDelegatedWeight: Array<Dec | null> = [];
+  const voteEffectiveWeight: Array<Dec | null> = [];
   let voterCount = 0;
+
+  // The delegation leg (v18), resolved BEFORE the tally loop and with the bar applied to the
+  // delegation GRAPH rather than to the totals afterwards. That ordering is the whole of the
+  // laundering defence: a bar applied only to ballots would stop a barred account voting and
+  // then let the same balance vote through a delegate.
+  //
+  // `voted` includes BARRED accounts. A barred ballot is not a vote, but it is still an act by
+  // that account's owner: as a delegator it revokes, and as a delegate it buys nothing because
+  // the bar refuses the delegation before the ballot is looked at.
+  const voted = new Set(votes.map((v) => v.account));
+  const delegations =
+    spec.delegationInput === null ? null : resolveDelegations(spec.delegationInput, voted, barred);
+  const delegationWeights =
+    delegations === null ? [] : delegations.map((d) => weights.get(d.delegator) ?? Dec.ZERO);
+  const delegated =
+    delegations === null
+      ? null
+      : delegatedWeightByDelegate(delegations, weights);
+  const delegatedFor = (account: string): Dec =>
+    delegated?.byDelegate.get(account) ?? Dec.ZERO;
 
   for (let i = 0; i < votes.length; i++) {
     const vote = votes[i] as (typeof votes)[number];
     if (barred.has(vote.account)) {
       voteExcluded.push(true);
+      // No delegation figures on a barred ballot: it is refused as a delegate before any weight
+      // is assigned, so printing a zero would suggest nobody had tried.
+      voteDelegatedWeight.push(null);
+      voteEffectiveWeight.push(null);
       continue;
     }
     voteExcluded.push(false);
-    const weight = weights.get(vote.account) ?? Dec.ZERO;
+    // `own` is this account's own snapshot weight; `delegated` is what other accounts asked it
+    // to carry. `weight` is the sum — what this BALLOT carries — and it is what every
+    // accumulator below sees, including the seat allocation, or an election would count
+    // delegation for quorum and ignore it for seats.
+    const own = weights.get(vote.account) ?? Dec.ZERO;
+    const delegatedHere = delegatedFor(vote.account);
+    const weight = delegations === null ? own : own.add(delegatedHere);
+    voteDelegatedWeight.push(delegations === null ? null : delegatedHere);
+    voteEffectiveWeight.push(delegations === null ? null : weight);
     // In the ballot list even when invalid: the allocator has to SEE an invalid ballot to report
     // it. `ballotIndex` keeps the report naming positions in the document's `votes`, which the
     // barred ballots above have already made non-consecutive.
@@ -521,6 +632,9 @@ export function deriveFigures(
         spec.approvalThresholdPc,
         spec.minAffirmativeSupport,
         quorumMet,
+        // The document's own comparison, not this verifier's vintage — the same discipline the
+        // Grade Quantile follows.
+        approvalBarIsInclusive(spec.tallyDocVersion),
       )
     : null;
 
@@ -559,6 +673,11 @@ export function deriveFigures(
     abstainWeight,
     voterCount,
     voteExcluded,
+    voteDelegatedWeight,
+    voteEffectiveWeight,
+    delegations,
+    delegationWeights,
+    delegatedWeightTotal: delegated?.total ?? null,
     quorumMet,
     masMet,
     approveWeight,
