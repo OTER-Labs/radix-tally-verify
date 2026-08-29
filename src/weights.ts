@@ -198,8 +198,14 @@ async function drainFungiblePages(
   );
 }
 
-/** Fungible balances per entity at a state version: account -> (resource -> amount), all pages. */
-async function fetchFungiblesAt(
+/**
+ * Fungible balances per entity at a state version: account -> (resource -> amount), all pages.
+ *
+ * Exported for the mirror-tally leg (`src/mirror.ts`): the OFFICIAL rule is liquid XRD only, no
+ * LSU/pool/lsulp/concentrated conversion, so it reads exactly this and picks out `xrdResource` —
+ * reusing the balance reader rather than a second implementation of fungible pagination.
+ */
+export async function fetchFungiblesAt(
   gw: GatewayClient,
   addresses: string[],
   stateVersion: number,
@@ -416,19 +422,34 @@ function lsuValue(
 }
 
 /**
- * The weights of `accounts` at `snapshotStateVersion`, under the register the document
- * carries. Every number the verdict is later derived from comes out of this function, so
- * this is the place where a verifier earns its keep.
+ * One account's weight, split by the leg that contributed it (mirror-tally `weight_delta_by_source`,
+ * `src/mirror.ts`). `total` is the same figure `computeAccountWeights` returns for this account —
+ * the split is additive, never a second computation of it.
  */
-export async function computeAccountWeights(
+export interface WeightBreakdown {
+  xrd: Dec;
+  lsu: Dec;
+  poolUnits: Dec;
+  lsulp: Dec;
+  precisionPools: Dec;
+  shapePools: Dec;
+  total: Dec;
+}
+
+/**
+ * The weights of `accounts` at `snapshotStateVersion`, under the register the document
+ * carries, split by leg. Every number the verdict is later derived from comes out of this
+ * function, so this is the place where a verifier earns its keep.
+ */
+export async function computeAccountWeightBreakdown(
   gw: GatewayClient,
   accounts: string[],
   snapshotStateVersion: number,
   sources: WeightSources,
   xrdResource: string,
-): Promise<Map<string, Dec>> {
-  const weights = new Map<string, Dec>();
-  if (accounts.length === 0) return weights;
+): Promise<Map<string, WeightBreakdown>> {
+  const breakdown = new Map<string, WeightBreakdown>();
+  if (accounts.length === 0) return breakdown;
 
   const fungibles = await fetchFungiblesAt(gw, accounts, snapshotStateVersion);
   const lsuMap = await fetchValidatorLsuMap(gw, snapshotStateVersion);
@@ -557,16 +578,19 @@ export async function computeAccountWeights(
 
   for (const account of accounts) {
     const balances = fungibles.get(account) ?? new Map<string, Dec>();
-    let weight = balances.get(xrdResource) ?? Dec.ZERO;
+    const xrd = balances.get(xrdResource) ?? Dec.ZERO;
+    let lsu = Dec.ZERO;
+    let poolUnits = Dec.ZERO;
+    let lsulpAmount = Dec.ZERO;
     for (const [resource, amount] of balances) {
-      weight = weight.add(lsuValue(resource, amount, lsuMap, supplyOf));
-      weight = weight.add(lsulpValue(resource, amount));
+      lsu = lsu.add(lsuValue(resource, amount, lsuMap, supplyOf));
+      lsulpAmount = lsulpAmount.add(lsulpValue(resource, amount));
       const pool = poolOf.get(resource);
       if (pool !== undefined) {
         const backing = poolBacking.get(pool);
         const supply = supplyOf(resource);
         if (backing !== undefined && supply !== null && supply.isPositive()) {
-          weight = weight.add(amount.mul(backing).div(supply));
+          poolUnits = poolUnits.add(amount.mul(backing).div(supply));
         }
       }
     }
@@ -577,6 +601,7 @@ export async function computeAccountWeights(
     // not a position worth nothing.
     const positionsOf = (resource: string): string[] =>
       heldPositions.get(account)?.get(resource) ?? [];
+    let precisionPoolsAmount = Dec.ZERO;
     for (const pool of precisionPools) {
       const data = positionData.get(pool.positionResource);
       for (const id of positionsOf(pool.positionResource)) {
@@ -589,9 +614,12 @@ export async function computeAccountWeights(
               `liquidity/left_bound/right_bound at sv ${snapshotStateVersion}`,
           );
         }
-        weight = weight.add(precisionPositionXrd(position, pool, divisibilityOf, valueInXrd));
+        precisionPoolsAmount = precisionPoolsAmount.add(
+          precisionPositionXrd(position, pool, divisibilityOf, valueInXrd),
+        );
       }
     }
+    let shapePoolsAmount = Dec.ZERO;
     for (const pool of shapePools) {
       const data = positionData.get(pool.positionResource);
       for (const id of positionsOf(pool.positionResource)) {
@@ -604,10 +632,51 @@ export async function computeAccountWeights(
               `liquidity_claims at sv ${snapshotStateVersion}`,
           );
         }
-        weight = weight.add(shapeClaimsXrd(claims, pool, valueInXrd));
+        shapePoolsAmount = shapePoolsAmount.add(shapeClaimsXrd(claims, pool, valueInXrd));
       }
     }
-    weights.set(account, weight);
+    const total = xrd
+      .add(lsu)
+      .add(poolUnits)
+      .add(lsulpAmount)
+      .add(precisionPoolsAmount)
+      .add(shapePoolsAmount);
+    breakdown.set(account, {
+      xrd,
+      lsu,
+      poolUnits,
+      lsulp: lsulpAmount,
+      precisionPools: precisionPoolsAmount,
+      shapePools: shapePoolsAmount,
+      total,
+    });
   }
+  return breakdown;
+}
+
+/**
+ * The weights of `accounts` at `snapshotStateVersion`, under the register the document
+ * carries. Every number the verdict is later derived from comes out of this function, so
+ * this is the place where a verifier earns its keep.
+ *
+ * A thin wrapper over {@link computeAccountWeightBreakdown}: same reads, same arithmetic, just
+ * the per-leg split discarded for callers that only want the total.
+ */
+export async function computeAccountWeights(
+  gw: GatewayClient,
+  accounts: string[],
+  snapshotStateVersion: number,
+  sources: WeightSources,
+  xrdResource: string,
+): Promise<Map<string, Dec>> {
+  const breakdown = await computeAccountWeightBreakdown(
+    gw,
+    accounts,
+    snapshotStateVersion,
+    sources,
+    xrdResource,
+  );
+  const weights = new Map<string, Dec>();
+  for (const [account, b] of breakdown) weights.set(account, b.total);
   return weights;
 }

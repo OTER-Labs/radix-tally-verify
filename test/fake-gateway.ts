@@ -23,6 +23,7 @@ const EMPTY_PAGE = { items: [] };
 
 export class FakeGateway implements GatewayClient {
   private detailsQueue: unknown[] = [];
+  private timestampDetailsQueue: unknown[] = [];
   private pageResponses = new Map<string, unknown>();
   private validatorsQueue: unknown[] = [];
   private vaultDetailsQueue: unknown[] = [];
@@ -46,6 +47,13 @@ export class FakeGateway implements GatewayClient {
 
   onValidators(response: unknown): this {
     this.validatorsQueue.push(response);
+    return this;
+  }
+
+  /** The mirror-tally window-bound resolver (`entityDetailsAtTimestamp`) — FIFO, like
+   * `entityDetails`, since call order (start's timestamp before deadline's) is the contract. */
+  onTimestampDetails(response: unknown): this {
+    this.timestampDetailsQueue.push(response);
     return this;
   }
 
@@ -179,6 +187,15 @@ export class FakeGateway implements GatewayClient {
     this.calls.push("validators");
     const next = this.validatorsQueue.shift();
     if (next === undefined) throw new GatewayError("FakeGateway: unexpected validators list");
+    return Promise.resolve(next);
+  }
+
+  entityDetailsAtTimestamp(address: string, timestampIso: string): Promise<unknown> {
+    this.calls.push(`timestamp-details:${address}:${timestampIso}`);
+    const next = this.timestampDetailsQueue.shift();
+    if (next === undefined) {
+      throw new GatewayError(`FakeGateway: unexpected entityDetailsAtTimestamp for ${timestampIso}`);
+    }
     return Promise.resolve(next);
   }
 }

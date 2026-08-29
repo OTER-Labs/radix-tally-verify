@@ -72,6 +72,9 @@ class DeadGateway implements GatewayClient {
   validatorsList(): Promise<unknown> {
     return Promise.reject(new GatewayError("unreachable"));
   }
+  entityDetailsAtTimestamp(): Promise<unknown> {
+    return Promise.reject(new GatewayError("unreachable"));
+  }
   entityDetailsVault(): Promise<unknown> {
     return Promise.reject(new GatewayError("unreachable"));
   }

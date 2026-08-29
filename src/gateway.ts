@@ -41,6 +41,20 @@ export interface GatewayClient {
   /** POST /state/validators/list, cursor-paginated. */
   validatorsList(stateVersion: number, cursor: string | null): Promise<unknown>;
 
+  /**
+   * POST /state/entity/details at a TIMESTAMP selector rather than a `state_version` — the
+   * Gateway's timestamp -> state-version resolver. The only thing wanted back is the response
+   * envelope's `ledger_state.state_version`; any well-known entity works as the address, since
+   * the entity's own data is not read. This is the SAME call the reference engine's
+   * `state_version_at` makes (`backend/src/tally_engine.rs`), ported here rather than
+   * approximated, for the mirror-tally window bounds (`src/mirror.ts`) — the two Gateway
+   * endpoints this tool otherwise reads (`entityDetails` above, and everything below) are always
+   * pinned to an explicit `state_version` on purpose; this is the one deliberate exception,
+   * because the window bounds are a TIMESTAMP by definition (`official_start` /
+   * `official_deadline`) and there is no cheap inverse of this resolver.
+   */
+  entityDetailsAtTimestamp(address: string, timestampIso: string): Promise<unknown>;
+
   /* ---- the concentrated-liquidity legs (tally document v17) ----------------
    * Six more endpoints, because a position is a NON-FUNGIBLE and none of the three above can
    * see one. Every leg before v17 valued a balance, which the fungible endpoints report; a
@@ -173,6 +187,13 @@ export class RadixGateway implements GatewayClient {
     };
     if (cursor !== null) payload["cursor"] = cursor;
     return this.post("/state/validators/list", payload);
+  }
+
+  entityDetailsAtTimestamp(address: string, timestampIso: string): Promise<unknown> {
+    return this.post("/state/entity/details", {
+      addresses: [address],
+      at_ledger_state: { timestamp: timestampIso },
+    });
   }
 
   entityDetailsVault(addresses: string[], stateVersion: number): Promise<unknown> {

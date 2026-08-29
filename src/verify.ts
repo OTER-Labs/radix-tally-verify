@@ -19,6 +19,7 @@ import { DocumentError, parseTallyDocument } from "./document.ts";
 import type { TallyDocument } from "./document.ts";
 import { GatewayError } from "./gateway.ts";
 import type { GatewayClient } from "./gateway.ts";
+import { verifyMirrorBallots } from "./mirror.ts";
 import { deriveFigures } from "./verdict.ts";
 import type { DerivedFigures } from "./verdict.ts";
 import { computeAccountWeights } from "./weights.ts";
@@ -193,8 +194,18 @@ export async function verifyTallyDocument(
   }
   const hash = expectedHash ?? envelopeHash;
 
+  let mirrorDifferences: Difference[] = [];
   let derived: DerivedFigures;
   try {
+    // Mirror documents (`ballot_source` present, `src/mirror.ts`) get four extra checks on top of
+    // the pipeline below, which runs unchanged for the fifth (the OTER-rule figures every mirror
+    // document already carries at top level, exactly as a Poll would). Run first, in the same
+    // try/catch: a gateway or register problem here is exactly as UNKNOWN/MALFORMED as one in the
+    // weight recomputation, and the two share the classification below rather than duplicate it.
+    if (doc.isMirror) {
+      mirrorDifferences = await verifyMirrorBallots(doc, gw, xrdResource);
+    }
+
     // Every account whose weight any published figure depends on: the ballots, plus (v18) every
     // DELEGATOR in force at the snapshot. A delegator who never voted still has a weight in the
     // document's `delegations` report and, when the delegation counted, inside a delegate's
@@ -244,7 +255,7 @@ export async function verifyTallyDocument(
     throw e;
   }
 
-  const differences = compareFigures(doc, derived);
+  const differences = [...mirrorDifferences, ...compareFigures(doc, derived)];
   if (differences.length > 0) return { kind: "figures", differences };
 
   // Figures agree. Only now does the byte-level question matter: is the document's canonical

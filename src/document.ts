@@ -47,6 +47,12 @@ import type {
  *     it used to be `>`, plus an explicit `decisive > 0` guard so a consultation with no
  *     decisive vote is not approved by `0 >= 0`. No shape change from v19.
  *
+ *   - **mirror tallies** (`plan-w1-mirror-tallies.md` §3) — the additive `ballot_source` block
+ *     that turns a document into a reproduction of an official Radix DAO Temperature Check or
+ *     Proposal, with its own `mirror_doc_version` (currently 1) so it can grow independently of
+ *     `TALLY_DOC_VERSION`. No bump here: bumping 20 for this would trip the on-chain
+ *     `weight_source_set` gate for a field that is purely additive. See `src/mirror.ts`.
+ *
  * No document is REFUSED for its version. Verification is driven by field presence, so one
  * written before any of these takes the absent-means-default path on each field and verifies
  * byte-identically to how it did before that version existed. The constant states which revision
@@ -60,6 +66,65 @@ import type {
  * every document would report correct historical tallies as lies.
  */
 export const TALLY_DOC_VERSION = 20;
+
+/**
+ * The two kinds of official Radix DAO vote a mirror document can reproduce (`plan-w1-mirror-tallies.md`
+ * §3, §6).
+ */
+export type MirrorKind = "temperature_check" | "proposal";
+
+/** The document's claim about what the OFFICIAL rule (liquid XRD only) found — recomputed and
+ * compared against the same absolute `official_quorum` / `official_approval_threshold`. */
+export interface OfficialRuleClaim {
+  rule: string;
+  totals: Dec[];
+  totalWeight: Dec;
+  quorumMet: boolean;
+  approved: boolean;
+}
+
+/**
+ * The per-leg gap between the OTER-rule total and the official-rule total (mirror-tally
+ * `weight_delta_by_source`) — what each non-liquid-XRD source, plus delegation, added on top of
+ * the official rule's plain balance read.
+ */
+export interface WeightDeltaBySource {
+  lsu: Dec;
+  poolUnits: Dec;
+  lsulp: Dec;
+  precisionPools: Dec;
+  shapePools: Dec;
+  delegationNet: Dec;
+}
+
+/**
+ * The additive `ballot_source` block (plan `plan-w1-mirror-tallies.md` §3) that turns an ordinary
+ * v20 tally document into a MIRROR of an official Radix DAO Temperature Check or Proposal.
+ *
+ * Presence, not a flag, is what makes a document a mirror (`TallyDocument.isMirror`) — the same
+ * field-presence discipline every other leg in this file follows. Nothing here changes
+ * `TALLY_DOC_VERSION`: the block is additive, so a document carrying it still parses and verifies
+ * as an ordinary v20 document for every field this block does not itself add, per §3's own
+ * statement that the top-level fields "carry the OTER-rule result exactly as a Poll would."
+ */
+export interface BallotSource {
+  mirrorDocVersion: number;
+  component: string;
+  blueprint: string;
+  kind: MirrorKind;
+  officialId: number;
+  officialStart: number;
+  officialDeadline: number;
+  officialQuorum: Dec;
+  officialApprovalThreshold: Dec;
+  officialVoteCount: number;
+  officialRevoteCount: number;
+  ballotCount: number;
+  ballotStateVersion: number;
+  ballotsOutsideWindow: number;
+  officialRule: OfficialRuleClaim;
+  weightDeltaBySource: WeightDeltaBySource;
+}
 
 /** The document could not be read as a tally document at all. Maps to exit 4, distinct from
  * all three verification outcomes: this is about the input, not about the tally. */
@@ -182,6 +247,13 @@ export interface TallyDocument {
   approveWeight: Dec | null;
   rejectWeight: Dec | null;
   approved: boolean | null;
+  /**
+   * The mirror-tally block (`plan-w1-mirror-tallies.md` §3), or `null` on an ordinary document.
+   * `isMirror` is exactly `ballotSource !== null` — presence is the switch, not a separate flag
+   * that could disagree with it.
+   */
+  ballotSource: BallotSource | null;
+  isMirror: boolean;
 }
 
 function fail(field: string, why: string): never {
@@ -533,6 +605,78 @@ function parseGradeQuantile(mjRaw: unknown): GradeQuantile | null {
   return { numerator: num, denominator: den };
 }
 
+const MIRROR_KINDS: readonly MirrorKind[] = ["temperature_check", "proposal"];
+
+function parseOfficialRuleClaim(raw: unknown): OfficialRuleClaim {
+  const o = asObject(raw);
+  const rule = asString(o["rule"]);
+  if (rule === null) fail("ballot_source.official_rule.rule", "is missing or not a string");
+  const totalsRaw = asArray(o["totals"]);
+  const totals = totalsRaw.map((t, i) => {
+    const s = asString(t);
+    if (s === null) fail(`ballot_source.official_rule.totals[${i}]`, "is not a Decimal string");
+    try {
+      return Dec.parse(s);
+    } catch (e) {
+      fail(
+        `ballot_source.official_rule.totals[${i}]`,
+        `is not a canonical Decimal: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  });
+  return {
+    rule: rule as string,
+    totals,
+    totalWeight: reqDec(o, "total_weight"),
+    quorumMet: reqBool(o, "quorum_met"),
+    approved: reqBool(o, "approved"),
+  };
+}
+
+function parseWeightDeltaBySource(raw: unknown): WeightDeltaBySource {
+  const o = asObject(raw);
+  return {
+    lsu: reqDec(o, "lsu"),
+    poolUnits: reqDec(o, "pool_units"),
+    lsulp: reqDec(o, "lsulp"),
+    precisionPools: reqDec(o, "precision_pools"),
+    shapePools: reqDec(o, "shape_pools"),
+    delegationNet: reqDec(o, "delegation_net"),
+  };
+}
+
+/**
+ * The `ballot_source` block (§3): absent is `null`, exactly like every other additive leg in
+ * this file — a document written before mirror tallies existed, or an ordinary Poll/Binding/
+ * Election document, verifies exactly as it always did.
+ */
+function parseBallotSource(raw: unknown): BallotSource | null {
+  if (raw === null || raw === undefined) return null;
+  const o = asObject(raw);
+  const kind = asString(o["kind"]);
+  if (kind === null || !(MIRROR_KINDS as readonly string[]).includes(kind)) {
+    fail("ballot_source.kind", `is missing or not one of ${JSON.stringify(MIRROR_KINDS)}`);
+  }
+  return {
+    mirrorDocVersion: reqInt(o, "mirror_doc_version"),
+    component: reqString(o, "component"),
+    blueprint: reqString(o, "blueprint"),
+    kind: kind as MirrorKind,
+    officialId: reqInt(o, "official_id"),
+    officialStart: reqInt(o, "official_start"),
+    officialDeadline: reqInt(o, "official_deadline"),
+    officialQuorum: reqDec(o, "official_quorum"),
+    officialApprovalThreshold: reqDec(o, "official_approval_threshold"),
+    officialVoteCount: reqInt(o, "official_vote_count"),
+    officialRevoteCount: reqInt(o, "official_revote_count"),
+    ballotCount: reqInt(o, "ballot_count"),
+    ballotStateVersion: reqInt(o, "ballot_state_version"),
+    ballotsOutsideWindow: reqInt(o, "ballots_outside_window"),
+    officialRule: parseOfficialRuleClaim(o["official_rule"]),
+    weightDeltaBySource: parseWeightDeltaBySource(o["weight_delta_by_source"]),
+  };
+}
+
 /**
  * Parse and validate a tally document. Accepts either the bare document or the API envelope
  * (`{"document": …, "document_hash_blake2b": …}`); the envelope's hash is returned alongside
@@ -617,6 +761,8 @@ export function parseTallyDocument(input: unknown): { doc: TallyDocument; envelo
     ? null
     : (optIntArray(winnersRaw, "winners") as number[]);
 
+  const ballotSource = parseBallotSource(raw["ballot_source"]);
+
   const doc: TallyDocument = {
     raw: raw as Json,
     tallyDocVersion: optInt(raw, "tally_doc_version"),
@@ -650,6 +796,8 @@ export function parseTallyDocument(input: unknown): { doc: TallyDocument; envelo
     approveWeight: optDec(raw, "approve_weight"),
     rejectWeight: optDec(raw, "reject_weight"),
     approved: optBool(raw, "approved"),
+    ballotSource,
+    isMirror: ballotSource !== null,
   };
   return { doc, envelopeHash };
 }
