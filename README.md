@@ -153,6 +153,11 @@ all. **Delegation is the one exception**: it survives into every space unchanged
 answers "whose ballot may carry this weight", which is orthogonal to what the weight function
 means — a member delegating to another member is the same act whatever the weight rule is.
 
+`asset_symbol` is **checked, not merely carried**: the named resource's `symbol` metadata is
+re-read at the same `snapshot_state_version` (the `Xrd` rule costs no Gateway call — its answer
+is the literal `"XRD"`) and compared against the document's claim. A mismatch is a figures-class
+finding, exactly like a wrong weight.
+
 No verdict logic changed: quorum, the approval bar, seat allocation and Majority Judgment are
 identical whichever config produced the weights they operate on. `src/mirror.ts` is unaffected —
 a mirror document carries the four keys as the space-0 constants, exactly like a Poll's, since a

@@ -22,7 +22,7 @@ import type { GatewayClient } from "./gateway.ts";
 import { verifyMirrorBallots } from "./mirror.ts";
 import { deriveFigures } from "./verdict.ts";
 import type { DerivedFigures } from "./verdict.ts";
-import { computeAccountWeights } from "./weights.ts";
+import { assetSymbolFor, computeAccountWeights } from "./weights.ts";
 
 export interface Difference {
   field: string;
@@ -195,6 +195,7 @@ export async function verifyTallyDocument(
   const hash = expectedHash ?? envelopeHash;
 
   let mirrorDifferences: Difference[] = [];
+  let assetSymbolDifferences: Difference[] = [];
   let derived: DerivedFigures;
   try {
     // Mirror documents (`ballot_source` present, `src/mirror.ts`) get four extra checks on top of
@@ -224,6 +225,20 @@ export async function verifyTallyDocument(
       doc.weightSources,
       xrdResource,
     );
+
+    // v22: the ticker the weights are denominated in, checked against the resource's own
+    // `symbol` metadata AT THE SNAPSHOT — "XRD" for the Xrd rule (no gateway call), the named
+    // resource's declared symbol ("" if it names none) for a Fungible/Membership space. A
+    // mismatch is a figures-class finding like any other published claim: `asset_symbol` sits
+    // inside the hashed document, so a wrong one is exactly as checkable as a wrong weight.
+    const configResource = doc.weightConfig.kind === "Xrd" ? null : doc.weightConfig.resource;
+    const expectedAssetSymbol = await assetSymbolFor(gw, configResource, doc.snapshotStateVersion);
+    if (expectedAssetSymbol !== doc.assetSymbol) {
+      assetSymbolDifferences = [
+        { field: "asset_symbol", document: doc.assetSymbol, recomputed: expectedAssetSymbol },
+      ];
+    }
+
     derived = deriveFigures(
       {
         kind: doc.kind,
@@ -255,7 +270,7 @@ export async function verifyTallyDocument(
     throw e;
   }
 
-  const differences = [...mirrorDifferences, ...compareFigures(doc, derived)];
+  const differences = [...mirrorDifferences, ...assetSymbolDifferences, ...compareFigures(doc, derived)];
   if (differences.length > 0) return { kind: "figures", differences };
 
   // Figures agree. Only now does the byte-level question matter: is the document's canonical

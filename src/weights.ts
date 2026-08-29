@@ -307,6 +307,48 @@ function metadataLink(item: Record<string, unknown>, key: string): string | null
   return null;
 }
 
+/**
+ * The `symbol` metadata a resource carried AT A STATE VERSION — the ticker a Fungible/Membership
+ * space's weights are denominated in (tally document v22 `asset_symbol`).
+ *
+ * Read at the snapshot, not "now": the value is compared against a claim inside the hashed
+ * document, and metadata is mutable by whoever holds the resource's metadata role — a "now" read
+ * could move a settled document's classification the first time an issuer renamed their token.
+ *
+ * Empty string when the resource declares no `symbol` — an absent ticker is a fact about the
+ * resource, not an error, mirroring the reference engine's `fetch_resource_symbol_at`.
+ */
+export async function fetchResourceSymbolAt(
+  gw: GatewayClient,
+  resource: string,
+  stateVersion: number,
+): Promise<string> {
+  const resp = asObject(
+    await gw.entityDetails([resource], stateVersion, { global: false, explicitMetadata: ["symbol"] }),
+  );
+  const message = asString(resp["message"]);
+  if (message !== null) {
+    throw new GatewayError(
+      `gateway refused resource details for ${resource} at sv ${stateVersion}: ${message}`,
+    );
+  }
+  const item = asArray(resp["items"])[0];
+  return item === undefined ? "" : metadataLink(asObject(item), "symbol") ?? "";
+}
+
+/**
+ * The ticker a consultation's weights are denominated in, at the document's own snapshot.
+ * `resource === null` is the Xrd rule — a SUM over XRD and everything convertible to it, so it
+ * has no single resource to read one from — and is the literal `"XRD"`, costing no Gateway call.
+ */
+export async function assetSymbolFor(
+  gw: GatewayClient,
+  resource: string | null,
+  stateVersion: number,
+): Promise<string> {
+  return resource === null ? "XRD" : fetchResourceSymbolAt(gw, resource, stateVersion);
+}
+
 /** Total supply and claimed pool linkage for the given fungible resources at a state version. */
 async function fetchResourceInfoAt(
   gw: GatewayClient,

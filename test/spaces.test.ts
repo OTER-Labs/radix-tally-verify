@@ -20,7 +20,12 @@ import { test } from "node:test";
 import { tallyHash } from "../src/canonical.ts";
 import type { Json } from "../src/canonical.ts";
 import { verifyTallyDocument } from "../src/verify.ts";
-import { computeAccountWeightBreakdown, computeAccountWeights } from "../src/weights.ts";
+import {
+  assetSymbolFor,
+  computeAccountWeightBreakdown,
+  computeAccountWeights,
+  fetchResourceSymbolAt,
+} from "../src/weights.ts";
 
 import { ACCOUNT_A, ACCOUNT_B, FakeGateway, SNAPSHOT_SV, XRD, scenarioGateway } from "./fake-gateway.ts";
 
@@ -28,6 +33,22 @@ const hash = (doc: Record<string, unknown>): string => tallyHash(doc as unknown 
 
 const FUNGIBLE_RESOURCE = "resource_rdx1tfungible00000000000000000000000000000000000000001";
 const MEMBERSHIP_RESOURCE = "resource_rdx1nmembership0000000000000000000000000000000000002";
+
+/** An `entityDetails` response naming one resource's `symbol` metadata — the shape
+ * `fetchResourceSymbolAt` reads (mirrors `backLink` in `legs-end-to-end.test.ts`). */
+const symbolDetails = (resource: string, symbol: string) => ({
+  items: [
+    {
+      address: resource,
+      explicit_metadata: { items: [{ key: "symbol", value: { typed: { value: symbol } } }] },
+    },
+  ],
+});
+
+/** A resource that declares no `symbol` key at all. */
+const noSymbolDetails = (resource: string) => ({
+  items: [{ address: resource, explicit_metadata: { items: [] } }],
+});
 
 /** A Binding tally document with every field the verdict needs, over whatever the test varies. */
 function bindingDoc(over: Record<string, unknown>): Record<string, unknown> {
@@ -59,21 +80,26 @@ function bindingDoc(over: Record<string, unknown>): Record<string, unknown> {
 // The Fungible leg
 // ---------------------------------------------------------------------------------------
 
-/** A holds 300 of the space's resource, B holds 50. One Gateway call: Global-aggregated
- * fungible balances of the two accounts — no validators, no pool lookup, nothing else. */
-function fungibleGateway(): FakeGateway {
-  return new FakeGateway().onDetails({
-    items: [
-      {
-        address: ACCOUNT_A,
-        fungible_resources: { items: [{ resource_address: FUNGIBLE_RESOURCE, amount: "300" }] },
-      },
-      {
-        address: ACCOUNT_B,
-        fungible_resources: { items: [{ resource_address: FUNGIBLE_RESOURCE, amount: "50" }] },
-      },
-    ],
-  });
+/** A holds 300 of the space's resource, B holds 50. Two Gateway calls when driven through
+ * `verifyTallyDocument`: the Global-aggregated fungible balances, then the resource's own
+ * `symbol` metadata for the v22 `asset_symbol` check — no validators, no pool lookup, nothing
+ * else. The unit tests below that call `computeAccountWeightBreakdown`/`computeAccountWeights`
+ * directly never reach the second call; it sits unused in the queue, which is harmless. */
+function fungibleGateway(symbol = "TAHU"): FakeGateway {
+  return new FakeGateway()
+    .onDetails({
+      items: [
+        {
+          address: ACCOUNT_A,
+          fungible_resources: { items: [{ resource_address: FUNGIBLE_RESOURCE, amount: "300" }] },
+        },
+        {
+          address: ACCOUNT_B,
+          fungible_resources: { items: [{ resource_address: FUNGIBLE_RESOURCE, amount: "50" }] },
+        },
+      ],
+    })
+    .onDetails(symbolDetails(FUNGIBLE_RESOURCE, symbol));
 }
 
 test("a Fungible space: weight is the account's balance of the one named resource", async () => {
@@ -128,14 +154,15 @@ test("a Fungible-space document: MATCH end to end, hash checked", async () => {
   const gw = fungibleGateway();
   const outcome = await verifyTallyDocument(doc, hash(doc), gw, XRD);
   assert.deepEqual(outcome, { kind: "match", hashChecked: true });
-  // Short-circuited: exactly the one fungible-balances call, nothing else.
-  assert.deepEqual(gw.calls, [`details:${ACCOUNT_A},${ACCOUNT_B}`]);
+  // Short-circuited: the fungible-balances call, the symbol check, nothing else.
+  assert.deepEqual(gw.calls, [`details:${ACCOUNT_A},${ACCOUNT_B}`, `details:${FUNGIBLE_RESOURCE}`]);
 });
 
 test("a Fungible-space document: a wrong published weight is FIGURES", async () => {
   const doc = bindingDoc({
     space_id: 3,
     weight_config: { kind: "Fungible", resource: FUNGIBLE_RESOURCE },
+    asset_symbol: "TAHU",
     weight_sources: { native_pools: { mode: "off" }, fungible: { resource: FUNGIBLE_RESOURCE } },
     votes: [
       { account: ACCOUNT_A, selection: [1], weight: "999" }, // wrong — should be 300
@@ -155,11 +182,94 @@ test("a Fungible-space document: a wrong published weight is FIGURES", async () 
 });
 
 // ---------------------------------------------------------------------------------------
+// The asset_symbol check (v22): the resource's `symbol` metadata AT THE SNAPSHOT, compared
+// against the document's own `asset_symbol` claim — a figures-class finding on mismatch.
+// ---------------------------------------------------------------------------------------
+
+test("assetSymbolFor: the Xrd rule is the literal \"XRD\" and makes no Gateway call", async () => {
+  const gw = new FakeGateway(); // no responses queued — a call here would throw
+  assert.equal(await assetSymbolFor(gw, null, SNAPSHOT_SV), "XRD");
+  assert.deepEqual(gw.calls, []);
+});
+
+test("fetchResourceSymbolAt reads the resource's symbol metadata at the pinned state version", async () => {
+  const gw = new FakeGateway().onDetails(symbolDetails(FUNGIBLE_RESOURCE, "TAHU"));
+  assert.equal(await fetchResourceSymbolAt(gw, FUNGIBLE_RESOURCE, SNAPSHOT_SV), "TAHU");
+});
+
+test("fetchResourceSymbolAt is \"\" when the resource declares no symbol", async () => {
+  const gw = new FakeGateway().onDetails(noSymbolDetails(FUNGIBLE_RESOURCE));
+  assert.equal(await fetchResourceSymbolAt(gw, FUNGIBLE_RESOURCE, SNAPSHOT_SV), "");
+});
+
+test("a wrong published asset_symbol is a figures-class finding", async () => {
+  const doc = bindingDoc({
+    space_id: 3,
+    weight_config: { kind: "Fungible", resource: FUNGIBLE_RESOURCE },
+    asset_symbol: "WRONG", // the resource actually declares TAHU
+    weight_sources: { native_pools: { mode: "off" }, fungible: { resource: FUNGIBLE_RESOURCE } },
+    votes: [
+      { account: ACCOUNT_A, selection: [1], weight: "300" },
+      { account: ACCOUNT_B, selection: [0], weight: "50" },
+    ],
+    totals: ["50", "300"],
+    total_weight: "350",
+    voter_count: 2,
+    approve_weight: "300",
+    reject_weight: "50",
+  });
+  const outcome = await verifyTallyDocument(doc, hash(doc), fungibleGateway("TAHU"), XRD);
+  assert.equal(outcome.kind, "figures");
+  if (outcome.kind === "figures") {
+    assert.deepEqual(
+      outcome.differences.find((d) => d.field === "asset_symbol"),
+      { field: "asset_symbol", document: "WRONG", recomputed: "TAHU" },
+    );
+  }
+});
+
+test("asset_symbol \"\" MATCHes when the resource declares no symbol", async () => {
+  const doc = bindingDoc({
+    space_id: 3,
+    weight_config: { kind: "Fungible", resource: FUNGIBLE_RESOURCE },
+    asset_symbol: "",
+    weight_sources: { native_pools: { mode: "off" }, fungible: { resource: FUNGIBLE_RESOURCE } },
+    votes: [
+      { account: ACCOUNT_A, selection: [1], weight: "300" },
+      { account: ACCOUNT_B, selection: [0], weight: "50" },
+    ],
+    totals: ["50", "300"],
+    total_weight: "350",
+    voter_count: 2,
+    approve_weight: "300",
+    reject_weight: "50",
+  });
+  const gw = new FakeGateway()
+    .onDetails({
+      items: [
+        {
+          address: ACCOUNT_A,
+          fungible_resources: { items: [{ resource_address: FUNGIBLE_RESOURCE, amount: "300" }] },
+        },
+        {
+          address: ACCOUNT_B,
+          fungible_resources: { items: [{ resource_address: FUNGIBLE_RESOURCE, amount: "50" }] },
+        },
+      ],
+    })
+    .onDetails(noSymbolDetails(FUNGIBLE_RESOURCE));
+  const outcome = await verifyTallyDocument(doc, hash(doc), gw, XRD);
+  assert.deepEqual(outcome, { kind: "match", hashChecked: true });
+});
+
+// ---------------------------------------------------------------------------------------
 // The Membership leg
 // ---------------------------------------------------------------------------------------
 
-/** A holds two badges of the membership resource (still weighs 1), B holds one, C holds none. */
-function membershipGateway(): FakeGateway {
+/** A holds two badges of the membership resource (still weighs 1), B holds one, C holds none.
+ * Driven through `verifyTallyDocument`, one more call follows: the resource's own `symbol`
+ * metadata for the v22 `asset_symbol` check. */
+function membershipGateway(symbol = "MEMBER"): FakeGateway {
   return new FakeGateway()
     .onNonFungibles(ACCOUNT_A, {
       items: [
@@ -176,7 +286,8 @@ function membershipGateway(): FakeGateway {
           vaults: { items: [{ vault_address: "internal_vault_rdx1b", items: ["#3#"] }] },
         },
       ],
-    });
+    })
+    .onDetails(symbolDetails(MEMBERSHIP_RESOURCE, symbol));
 }
 
 test("a Membership space: weight is 1-or-0 per account, however many badges held", async () => {
@@ -216,8 +327,13 @@ test("a Membership-space document: MATCH end to end, hash checked", async () => 
   const gw = membershipGateway();
   const outcome = await verifyTallyDocument(doc, hash(doc), gw, XRD);
   assert.deepEqual(outcome, { kind: "match", hashChecked: true });
-  // Short-circuited: one non-fungible page per account, nothing else (no fungibles, no validators).
-  assert.deepEqual(gw.calls, [`non-fungibles:${ACCOUNT_A}`, `non-fungibles:${ACCOUNT_B}`]);
+  // Short-circuited: one non-fungible page per account, the symbol check, nothing else (no
+  // fungibles, no validators).
+  assert.deepEqual(gw.calls, [
+    `non-fungibles:${ACCOUNT_A}`,
+    `non-fungibles:${ACCOUNT_B}`,
+    `details:${MEMBERSHIP_RESOURCE}`,
+  ]);
 });
 
 // ---------------------------------------------------------------------------------------
