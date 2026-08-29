@@ -305,6 +305,34 @@ test("a correct mirror document is a MATCH", async () => {
   assert.deepEqual(outcome, { kind: "match", hashChecked: true });
 });
 
+/**
+ * v22: a mirror document carries the four new keys as the SPACE-0 CONSTANTS — the reference
+ * engine's `compute_tally` writes them on every document unconditionally, mirror or not, and a
+ * mirror consultation lives in the Radix/XRD space like every consultation did before spaces
+ * existed. `src/mirror.ts` is otherwise unaffected (every test above and below this one is
+ * unchanged): the four keys are additive fields the mirror path never reads, exactly like every
+ * other v20 field it does not touch.
+ */
+test("a mirror document carries the v22 space keys as the space-0 constants, and still MATCHes", async () => {
+  const doc = mirrorDoc({
+    tally_doc_version: 22,
+    space_id: 0,
+    weight_config: { kind: "Xrd" },
+    term_seconds: 0,
+    asset_symbol: "XRD",
+  });
+  const { parseTallyDocument } = await import("../src/document.ts");
+  const { doc: parsed } = parseTallyDocument(doc);
+  assert.equal(parsed.spaceId, 0);
+  assert.deepEqual(parsed.weightConfig, { kind: "Xrd" });
+  assert.equal(parsed.termSeconds, 0);
+  assert.equal(parsed.assetSymbol, "XRD");
+  assert.equal(parsed.isMirror, true);
+
+  const outcome = await verifyTallyDocument(doc, hash(doc), mirrorGateway(), XRD);
+  assert.deepEqual(outcome, { kind: "match", hashChecked: true });
+});
+
 test("(a) a ballot the chain does not agree with is a figures disagreement naming (a)", async () => {
   const doc = mirrorDoc();
   const outcome = await verifyTallyDocument(

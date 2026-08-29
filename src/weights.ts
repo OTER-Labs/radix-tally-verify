@@ -19,6 +19,16 @@
  *                       Σ over CaviarNine QuantaSwap receipts held: the XRD value of the
  *                       receipt's bin claims
  *
+ * v22 adds two more rules that REPLACE the sum above rather than extend it — a consultation
+ * belongs to exactly one SPACE, and a non-Xrd space's electorate is one resource's holders, not
+ * XRD holders plus that resource:
+ *
+ *   weight(account) = the account's balance of weight_sources.fungible.resource at the snapshot
+ *     (a `Fungible` space — no XRD, no LSUs, no pools, no supplementary register), or
+ *   weight(account) = 1 if the account held >= 1 non-fungible of weight_sources.membership.resource
+ *     at the snapshot, 0 otherwise (a `Membership` space — one account, one vote, whatever the
+ *     count)
+ *
  * where a pool's XRD backing is its own XRD vault plus its LSUs converted by the same rule,
  * plus any register-named LSULP it holds at the same lsulp rate.
  * Which pool units count is governed by the document's own `weight_sources` register — this
@@ -117,6 +127,25 @@ export type DelegationSource =
   | { mode: "off" }
   | { mode: "component"; component: string };
 
+/**
+ * The `Fungible` space leg (tally document v22): weight = the account's balance of this ONE
+ * resource at the snapshot. Present only on a consultation of such a space; not registrable by
+ * anyone, and not an extra source added on top of the others — it REPLACES the whole XRD sum, so
+ * every other leg is off wherever this one is present. See `computeAccountWeightBreakdown`.
+ */
+export interface FungibleSource {
+  resource: string;
+}
+
+/**
+ * The `Membership` space leg (tally document v22): weight = 1 for an account holding at least
+ * one non-fungible of this resource at the snapshot, 0 otherwise — however many it holds. Same
+ * provenance and same replace-not-add relationship to the other legs as `FungibleSource`.
+ */
+export interface MembershipSource {
+  resource: string;
+}
+
 export interface WeightSources {
   native_pools: NativePoolSources;
   /** Absent = off — v15 documents (and v16 documents that never enabled the leg) verify identically. */
@@ -127,6 +156,11 @@ export interface WeightSources {
   shape_pools?: ConcentratedPoolSources;
   /** Absent = off (v18). */
   delegation?: DelegationSource;
+  /** Present only on a `Fungible` space's consultation (v22). At most one of `fungible` /
+   * `membership` is ever present — a consultation is weighed under exactly one `WeightConfig`. */
+  fungible?: FungibleSource;
+  /** Present only on a `Membership` space's consultation (v22). */
+  membership?: MembershipSource;
 }
 
 /** The components a concentrated-liquidity leg names, or none when it is off or absent. */
@@ -433,6 +467,11 @@ export interface WeightBreakdown {
   lsulp: Dec;
   precisionPools: Dec;
   shapePools: Dec;
+  /** v22: a `Fungible` space's balance of its one resource. Mutually exclusive with every leg
+   * above and with `membership` — a space is weighed under exactly one `WeightConfig`. */
+  fungible: Dec;
+  /** v22: a `Membership` space's 1-or-0. Mutually exclusive with every other leg. */
+  membership: Dec;
   total: Dec;
 }
 
@@ -450,6 +489,54 @@ export async function computeAccountWeightBreakdown(
 ): Promise<Map<string, WeightBreakdown>> {
   const breakdown = new Map<string, WeightBreakdown>();
   if (accounts.length === 0) return breakdown;
+
+  // v22 — the two SPACE rules. Checked first and returned from, because they are not extra legs
+  // added to the XRD sum: they REPLACE it. A `Fungible` space's electorate is one resource's
+  // holders and a `Membership` space's is one badge's holders, so running the XRD walk first and
+  // then ignoring it would be both wrong and an order of magnitude of Gateway calls nobody needs.
+  // Which one applies is carried in the document's own `weight_sources`, so a challenger reads
+  // the branch taken rather than inferring it — mirrors the reference engine's
+  // `compute_account_weight_breakdowns` exactly.
+  if (sources.fungible !== undefined) {
+    const resource = sources.fungible.resource;
+    const balances = await fetchFungiblesAt(gw, accounts, snapshotStateVersion);
+    for (const account of accounts) {
+      const amount = balances.get(account)?.get(resource) ?? Dec.ZERO;
+      breakdown.set(account, {
+        xrd: Dec.ZERO,
+        lsu: Dec.ZERO,
+        poolUnits: Dec.ZERO,
+        lsulp: Dec.ZERO,
+        precisionPools: Dec.ZERO,
+        shapePools: Dec.ZERO,
+        fungible: amount,
+        membership: Dec.ZERO,
+        total: amount,
+      });
+    }
+    return breakdown;
+  }
+  if (sources.membership !== undefined) {
+    const resource = sources.membership.resource;
+    const held = await fetchPositionIdsAt(gw, accounts, new Set([resource]), snapshotStateVersion);
+    for (const account of accounts) {
+      // One per ACCOUNT, not one per badge: a member with a hundred badges weighs 1.
+      const ids = held.get(account)?.get(resource) ?? [];
+      const amount = ids.length > 0 ? Dec.ONE : Dec.ZERO;
+      breakdown.set(account, {
+        xrd: Dec.ZERO,
+        lsu: Dec.ZERO,
+        poolUnits: Dec.ZERO,
+        lsulp: Dec.ZERO,
+        precisionPools: Dec.ZERO,
+        shapePools: Dec.ZERO,
+        fungible: Dec.ZERO,
+        membership: amount,
+        total: amount,
+      });
+    }
+    return breakdown;
+  }
 
   const fungibles = await fetchFungiblesAt(gw, accounts, snapshotStateVersion);
   const lsuMap = await fetchValidatorLsuMap(gw, snapshotStateVersion);
@@ -648,6 +735,10 @@ export async function computeAccountWeightBreakdown(
       lsulp: lsulpAmount,
       precisionPools: precisionPoolsAmount,
       shapePools: shapePoolsAmount,
+      // v22: the two space legs are always zero on the Xrd path — a document that reaches here
+      // carries neither `weight_sources.fungible` nor `.membership`.
+      fungible: Dec.ZERO,
+      membership: Dec.ZERO,
       total,
     });
   }

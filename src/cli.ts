@@ -14,6 +14,7 @@
 
 import { readFileSync } from "node:fs";
 
+import { DocumentError, parseTallyDocument } from "./document.ts";
 import { RadixGateway } from "./gateway.ts";
 import { verifyTallyDocument } from "./verify.ts";
 
@@ -93,6 +94,20 @@ async function main(): Promise<void> {
       `cannot tell which network ${args.gateway} serves — pass --xrd-resource explicitly\n`,
     );
     process.exit(4);
+  }
+
+  // v22: echo which space/term this document claims, ahead of the verdict — a no-op on any
+  // document that verifies wrong, and on any document this parse itself refuses (verifyTallyDocument
+  // reports that below as MALFORMED; there is nothing to echo yet).
+  try {
+    const { doc } = parseTallyDocument(input);
+    const config =
+      doc.weightConfig.kind === "Xrd" ? "Xrd" : `${doc.weightConfig.kind}:${doc.weightConfig.resource}`;
+    process.stdout.write(
+      `space_id=${doc.spaceId} weight_config=${config} term_seconds=${doc.termSeconds} asset_symbol=${doc.assetSymbol}\n`,
+    );
+  } catch (e) {
+    if (!(e instanceof DocumentError)) throw e;
   }
 
   const outcome = await verifyTallyDocument(

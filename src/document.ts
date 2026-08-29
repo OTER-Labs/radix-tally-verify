@@ -19,6 +19,8 @@ import { GRADES } from "./verdict.ts";
 import type { GradeQuantile } from "./verdict.ts";
 import type {
   ConcentratedPoolSources,
+  FungibleSource,
+  MembershipSource,
   NativePoolSources,
   WeightSources,
 } from "./weights.ts";
@@ -46,6 +48,20 @@ import type {
  *   - **20** — the approval test is INCLUSIVE: `approve * 100 >= decisive * threshold_pc` where
  *     it used to be `>`, plus an explicit `decisive > 0` guard so a consultation with no
  *     decisive vote is not approved by `0 >= 0`. No shape change from v19.
+ *   - **21 — SKIPPED, DELIBERATELY.** The official-vote mirror shipped additively under v20 (see
+ *     "mirror tallies" below); the number is recorded here as burnt, not missing, so nobody
+ *     hunting for "what was v21" concludes one was lost or re-issues it for something else.
+ *   - **22 — SPACES.** A consultation now belongs to a SPACE — a self-contained electorate with
+ *     its own weight rule, inside the one registry. Four additive keys: `space_id` (0 = the
+ *     Radix/XRD space every v1..v20 consultation implicitly lived in), `weight_config`
+ *     (`{"kind":"Xrd"} | {"kind":"Fungible","resource":…} | {"kind":"Membership","resource":…}`,
+ *     the space's immutable rule), `term_seconds` (an Election's seat term; 0 elsewhere), and
+ *     `asset_symbol` (the weighed resource's `symbol` metadata read AT THE SNAPSHOT; `"XRD"` for
+ *     the Xrd rule). `weight_sources` gains `fungible`/`membership` legs under the same
+ *     `skip_serializing_if`-style discipline as every other post-v15 leg: absent means the space
+ *     is Xrd (or the document predates v22), present names the ONE resource the weight rule
+ *     replaces the whole XRD sum with — not an extra leg added on top, but the sole source, so a
+ *     Fungible or Membership document's every other leg is off. No shape change to anything else.
  *
  *   - **mirror tallies** (`plan-w1-mirror-tallies.md` §3) — the additive `ballot_source` block
  *     that turns a document into a reproduction of an official Radix DAO Temperature Check or
@@ -65,7 +81,20 @@ import type {
  * recomputed at the Grade Quantile it publishes. A verifier that applied today's comparison to
  * every document would report correct historical tallies as lies.
  */
-export const TALLY_DOC_VERSION = 20;
+export const TALLY_DOC_VERSION = 22;
+
+/**
+ * v22: how a SPACE turns holdings into weight — the registry's `weight_config`, denormalised
+ * onto the consultation at creation and immutable for the life of the space.
+ *
+ * `Xrd` has no `resource` key at all (an absent field, not a null) — it is a SUM over many
+ * resources, so it has no single one to name. Absent `weight_config` (any pre-v22 document)
+ * parses to `{kind:"Xrd"}`, which is what every document up to v20 implicitly was.
+ */
+export type WeightConfig =
+  | { kind: "Xrd" }
+  | { kind: "Fungible"; resource: string }
+  | { kind: "Membership"; resource: string };
 
 /**
  * The two kinds of official Radix DAO vote a mirror document can reproduce (`plan-w1-mirror-tallies.md`
@@ -188,6 +217,23 @@ export interface TallyDocument {
   consultationId: string;
   kind: string;
   snapshotStateVersion: number;
+  /**
+   * v22: which SPACE this consultation belongs to. `0` — the Radix/XRD space — is both the
+   * literal default and what every pre-v22 document implicitly was.
+   */
+  spaceId: number;
+  /** v22: the space's immutable weight rule. `{kind:"Xrd"}` when the document carries none. */
+  weightConfig: WeightConfig;
+  /** v22: the seat term an Election declares, in seconds. `0` everywhere else, including every
+   * pre-v22 document. */
+  termSeconds: number;
+  /**
+   * v22: the ticker the weights are denominated in — the weighed resource's `symbol` metadata,
+   * read AT THE SNAPSHOT so a later rename cannot move a settled hash. `"XRD"` for the Xrd rule
+   * (which sums many resources and has none to read one from) and for any document that
+   * predates this field.
+   */
+  assetSymbol: string;
   weightSources: WeightSources;
   /**
    * Accounts the DAO controls, whose balances may not be voted (framework 47ceb27, charter §5).
@@ -426,7 +472,53 @@ function parseWeightSources(raw: unknown): WeightSources {
     }
   }
 
+  // v22: the two SPACE legs. Not Tier 2 supplementary sources and not registrable — the
+  // space's own IMMUTABLE `weight_config`, carried in the register so the one document a
+  // challenger recomputes from states which resource the weights are balances of. Absent means
+  // the space is Xrd (or the document predates v22); at most one of the two is ever present,
+  // because a consultation is weighed under exactly one `WeightConfig`.
+  const fungibleRaw = ws["fungible"];
+  if (fungibleRaw !== undefined && fungibleRaw !== null) {
+    const f = asObject(fungibleRaw);
+    const resource = asString(f["resource"]);
+    if (resource === null || resource === "") {
+      fail("weight_sources.fungible.resource", "is missing or not a string");
+    }
+    out.fungible = { resource };
+  }
+  const membershipRaw = ws["membership"];
+  if (membershipRaw !== undefined && membershipRaw !== null) {
+    const m = asObject(membershipRaw);
+    const resource = asString(m["resource"]);
+    if (resource === null || resource === "") {
+      fail("weight_sources.membership.resource", "is missing or not a string");
+    }
+    out.membership = { resource };
+  }
+
   return out;
+}
+
+const WEIGHT_CONFIG_KINDS = ["Xrd", "Fungible", "Membership"] as const;
+
+/**
+ * The `weight_config` field (v22): the space's immutable rule. Absent is `{kind:"Xrd"}` — every
+ * document written before v22 lived in the (implicit) Radix/XRD space, and this is what makes
+ * such a document verify exactly as it always did.
+ */
+function parseWeightConfig(raw: unknown): WeightConfig {
+  if (raw === undefined || raw === null) return { kind: "Xrd" };
+  const o = asObject(raw);
+  const kind = asString(o["kind"]);
+  if (kind === null || !(WEIGHT_CONFIG_KINDS as readonly string[]).includes(kind)) {
+    fail("weight_config.kind", `is missing or not one of ${JSON.stringify(WEIGHT_CONFIG_KINDS)}`);
+  }
+  if (kind === "Xrd") return { kind: "Xrd" };
+  const resource = asString(o["resource"]);
+  if (resource === null || resource === "") {
+    fail("weight_config.resource", "is missing or not a string");
+  }
+  return { kind: kind as "Fungible" | "Membership", resource };
 }
 
 /** One concentrated-liquidity leg of the register: absent/off, or an allowlist of components. */
@@ -763,12 +855,27 @@ export function parseTallyDocument(input: unknown): { doc: TallyDocument; envelo
 
   const ballotSource = parseBallotSource(raw["ballot_source"]);
 
+  // v22. Every one of the four is additive and absent-means-default, so a v20 document (or a
+  // mirror document, which the reference engine writes with the space-0 constants explicitly)
+  // parses to the same values either way.
+  const assetSymbolRaw = raw["asset_symbol"];
+  let assetSymbol = "XRD";
+  if (assetSymbolRaw !== undefined && assetSymbolRaw !== null) {
+    const s = asString(assetSymbolRaw);
+    if (s === null) fail("asset_symbol", "is neither absent nor a string");
+    assetSymbol = s;
+  }
+
   const doc: TallyDocument = {
     raw: raw as Json,
     tallyDocVersion: optInt(raw, "tally_doc_version"),
     consultationId: reqString(raw, "consultation_id"),
     kind,
     snapshotStateVersion,
+    spaceId: optInt(raw, "space_id") ?? 0,
+    weightConfig: parseWeightConfig(raw["weight_config"]),
+    termSeconds: optInt(raw, "term_seconds") ?? 0,
+    assetSymbol,
     weightSources: parseWeightSources(raw["weight_sources"]),
     excludedAccounts: parseExcludedAccounts(raw["excluded_accounts"]),
     weightSetVersion: optInt(raw, "weight_set_version"),

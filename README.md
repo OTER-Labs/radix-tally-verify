@@ -3,9 +3,10 @@
 Independently recompute a Radix governance consultation's tally from Gateway state, and check it
 against the hash committed on-ledger.
 
-**Status: working. Supported tally document version: 20.** The full pipeline exists: weight
-recomputation from Gateway historical state, verdict re-derivation, canonical re-serialization,
-and the hash check, behind a CLI whose exit codes distinguish the three outcomes above.
+**Status: working. Supported tally document version: 22 (21 was never issued).** The full
+pipeline exists: weight recomputation from Gateway historical state, verdict re-derivation,
+canonical re-serialization, and the hash check, behind a CLI whose exit codes distinguish the
+three outcomes above.
 
 No document is refused for its version. Verification is driven by field presence, so one written
 before any given leg existed takes the absent-means-off path on each field and verifies exactly as
@@ -110,10 +111,52 @@ are switched on. Every leg below is recomputed from Gateway historical state at 
 | **Precision pools** (Ociswap `PrecisionPool`, V1 and V2) | 17 | position NFT data and the pool's `price_sqrt`, through the 36-place tick power and the three-branch split; principal only | recomputed |
 | **Shape pools** (CaviarNine `QuantaSwap`) | 17 | receipt `liquidity_claims` against `tick_index.current`, the active reserves, and the full `bin_map` key-value store | recomputed |
 | **Delegation** | 18 | the resolution, the per-delegate sums, and their effect on every total and on the verdict | recomputed **from a carried input** — see below |
+| **Fungible space** | 22 | the account's balance of the ONE resource `weight_config` names — replaces the whole sum above, not a leg on top of it | recomputed |
+| **Membership space** | 22 | 1-or-0 per account (≥1 non-fungible of the named resource held), replacing the sum above the same way | recomputed |
 
 And the verdict, in full: quorum on both legs, the Binding gates, the DAO-controlled-funds bar,
 Majority Judgment's qualifying grades and gauges at the document's own quantile, `invalid_ballots`,
 the withdrawn-candidate exclusion, and every seat allocation.
+
+## Spaces (tally document v22)
+
+A consultation now belongs to a **space** — a self-contained electorate inside the one registry,
+with its own immutable weight rule. Space `0` is the Radix/XRD space every consultation lived in
+before spaces existed, and it is also what an absent `space_id` means: a v20 document verifies
+exactly as it always did.
+
+Four keys, all additive, all absent-means-default:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `space_id` | number | `0` = the Radix/XRD space. Absent = `0`. |
+| `weight_config` | object | `{"kind":"Xrd"}` \| `{"kind":"Fungible","resource":…}` \| `{"kind":"Membership","resource":…}`. **The `Xrd` form has no `resource` key at all** — an absent field, not a null. Absent = `{"kind":"Xrd"}`. |
+| `term_seconds` | number | An Election's seat term. `0` elsewhere, and absent = `0`. |
+| `asset_symbol` | string | The weighed resource's `symbol` metadata, read **at `snapshot_state_version`** (not "now" — metadata is mutable, and a later rename must not move a settled hash). `"XRD"` for the `Xrd` rule, which sums many resources and has none to read one from. Absent = `"XRD"`. |
+
+`weight_sources` gains two more legs under the same `skip_serializing_if`-style discipline every
+post-v15 leg has — present only on a consultation of that kind of space, absent (and therefore off)
+everywhere else:
+
+- **`fungible: {resource}`** — a `Fungible` space's weight is the account's balance of that ONE
+  resource at the snapshot. Nothing else counts: no XRD, no LSUs, no pools, no supplementary
+  register. Because the weight is a transferable balance, it is buyable — the levers against that
+  are the space's absolute `min_binding_quorum`, its recall path, and choosing a Membership space.
+- **`membership: {resource}`** — a `Membership` space's weight is `1` if the account holds at
+  least one non-fungible of that resource at the snapshot, `0` otherwise, **however many it
+  holds**. Whoever controls the resource's mint controls the electorate.
+
+Both legs **replace** the ordinary XRD sum rather than adding to it — a Fungible or Membership
+document's `xrd`, `lsu`, `pool_units`, `lsulp`, `precision_pools` and `shape_pools` legs are all
+zero, and `computeAccountWeightBreakdown` short-circuits before touching validators or pools at
+all. **Delegation is the one exception**: it survives into every space unchanged, because it
+answers "whose ballot may carry this weight", which is orthogonal to what the weight function
+means — a member delegating to another member is the same act whatever the weight rule is.
+
+No verdict logic changed: quorum, the approval bar, seat allocation and Majority Judgment are
+identical whichever config produced the weights they operate on. `src/mirror.ts` is unaffected —
+a mirror document carries the four keys as the space-0 constants, exactly like a Poll's, since a
+mirror consultation lives in the Radix/XRD space.
 
 ## What is not recomputed, and why
 
