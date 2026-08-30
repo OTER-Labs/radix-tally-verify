@@ -254,6 +254,11 @@ export async function verifyTallyDocument(
         gradeQuantile: doc.gradeQuantile,
         delegationInput: doc.delegationInput,
         tallyDocVersion: doc.tallyDocVersion,
+        binarySides: doc.ballotSource
+          ? doc.ballotSource.kind === "temperature_check"
+            ? { affirmative: 1, negative: 0 }
+            : { affirmative: 0, negative: 1 }
+          : undefined,
       },
       doc.votes,
       weights,

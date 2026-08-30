@@ -44,7 +44,7 @@ function mirrorDoc(over: Record<string, unknown> = {}, ballotSourceOver: Record<
   return {
     tally_doc_version: 20,
     consultation_id: "official:temperature_check:5",
-    kind: "Binding",
+    kind: "Poll", // the engine routes a mirror as a Poll; the binary verdict fields come from ballot_source.kind
     options: ["Against", "For"],
     snapshot_state_version: SNAPSHOT_SV,
     excluded_accounts: [],

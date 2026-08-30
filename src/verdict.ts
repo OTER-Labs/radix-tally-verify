@@ -76,6 +76,12 @@ export interface Ballot {
 /** Everything about the consultation the verdict needs, taken from the document. */
 export interface VerdictSpec {
   kind: string;
+  /** Mirror documents (`ballot_source` present) are `kind: "Poll"` yet publish the binary
+   * verdict fields — the engine's `official_tally` treats any TWO-option official vote as
+   * binding, with the affirmative side at `For` (index 1) for a temperature check and at
+   * option 0 for a proposal (`OfficialKind::binary_sides`). Set from `ballot_source.kind`;
+   * absent on every non-mirror document. */
+  binarySides?: { affirmative: number; negative: number } | undefined;
   /** Width of the option space — the document's `totals` length. For a Majority Judgment
    * election it is five times the candidate count, because the MJ ballot grades every
    * candidate and `totals` is the raw per-(candidate, grade) distribution. */
@@ -621,14 +627,27 @@ export function deriveFigures(
   // Approve/Reject only mean something for a Binding consultation, whose option list is fixed
   // at [Reject, Approve]. Elsewhere there is no single affirmative side, so the verdict is
   // null rather than invented.
-  const binding = spec.kind === "Binding" && totals.length === 2;
-  const approveWeight = binding ? (totals[1] as Dec) : null;
-  const rejectWeight = binding ? (totals[0] as Dec) : null;
-  const masMet = binding ? (totals[1] as Dec).gte(spec.minAffirmativeSupport) : null;
-  const approved = binding
+  // A mirror document is the other binary case: `kind: "Poll"`, sides named by the official
+  // vote's kind (see `VerdictSpec.binarySides`). Its `mas_met` is published as `true` on a
+  // binary vote — the official rule states no MAS floor — so it is reproduced, not recomputed.
+  const sides =
+    totals.length !== 2
+      ? null
+      : spec.kind === "Binding"
+        ? { affirmative: 1, negative: 0 }
+        : (spec.binarySides ?? null);
+  const binding = sides !== null;
+  const approveWeight = sides ? (totals[sides.affirmative] as Dec) : null;
+  const rejectWeight = sides ? (totals[sides.negative] as Dec) : null;
+  const masMet = sides
+    ? spec.binarySides
+      ? true
+      : (totals[sides.affirmative] as Dec).gte(spec.minAffirmativeSupport)
+    : null;
+  const approved = sides
     ? bindingApproved(
-        totals[1] as Dec,
-        totals[0] as Dec,
+        totals[sides.affirmative] as Dec,
+        totals[sides.negative] as Dec,
         spec.approvalThresholdPc,
         spec.minAffirmativeSupport,
         quorumMet,
