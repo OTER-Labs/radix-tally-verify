@@ -55,7 +55,8 @@ const BALLOT_SV = SNAPSHOT_SV + 50;
  * both, the stokenet allowlist names no pool, and nobody holds one — so both legs read Against
  * 30, For 145 (120 liquid + the staked voter's 25 XRD of LSU), total 175, and every
  * `weight_delta_by_source` leg is zero. A staked voter weighing the same under both rules is the
- * whole point of #172: before it, this fixture's official leg dropped the 25. Both use the
+ * whole point of the rule as it now stands: an earlier version of this fixture's official leg
+ * dropped the 25. Both use the
  * official absolute quorum 100 / threshold 50. */
 function mirrorDoc(over: Record<string, unknown> = {}, ballotSourceOver: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -336,7 +337,7 @@ test("a correct mirror document is a MATCH", async () => {
 
 /**
  * v22: a mirror document carries the four new keys as the SPACE-0 CONSTANTS — the reference
- * engine's `compute_tally` writes them on every document unconditionally, mirror or not, and a
+ * engine writes them on every document unconditionally, mirror or not, and a
  * mirror consultation lives in the Radix/XRD space like every consultation did before spaces
  * existed. `src/mirror.ts` is otherwise unaffected (every test above and below this one is
  * unchanged): the four keys are additive fields the mirror path never reads, exactly like every
@@ -383,7 +384,7 @@ test("(a) a ballot the chain does not agree with is a figures disagreement namin
   assert.ok(d, `expected an (a) ballots[...] difference, got: ${JSON.stringify(outcome.differences)}`);
 });
 
-/** The pre-#172 number: an official leg that read liquid XRD only put 120 on the For side and
+/** The old number: an official leg that read liquid XRD only put 120 on the For side and
  * dropped the staked voter's 25. It is now a DIFFERENCE, which is the regression this check
  * exists to catch — a mirror still claiming the old rule's figure is claiming a rule the
  * Consultation App does not apply. */
@@ -508,7 +509,7 @@ test("(d) a ballot after the resolved deadline is counted as late", async () => 
 
 test("(d) a still-open window (deadline in the future) counts no ballot late", async () => {
   // official_deadline set far in the future: the upper bound is unbounded (the engine's
-  // `deadline_state_version = i64::MAX`), so no `entityDetailsAtTimestamp` call is even made for
+  // unbounded `deadline_state_version`), so no `entityDetailsAtTimestamp` call is even made for
   // it — `mirrorGateway({ deadlineSv: null })` queues none, and an unexpected call fails loudly.
   const futureDeadline = Math.floor(Date.now() / 1000) + 10_000_000;
   const doc = mirrorDoc({}, { official_deadline: futureDeadline, ballots_outside_window: 0 });
@@ -545,7 +546,7 @@ test("(e) a stale weight_delta_by_source leg is a figures disagreement naming (e
   if (outcome.kind !== "figures") return;
   const d = outcome.differences.find((x) => x.field === "ballot_source.(e) weight_delta_by_source.lsu");
   assert.ok(d, `expected a (e) weight_delta_by_source.lsu difference, got: ${JSON.stringify(outcome.differences)}`);
-  // The pre-#172 claim: "the LSU leg is what the official rule drops". Both rules count it now,
+  // The old claim: "the LSU leg is what the official rule drops". Both rules count it now,
   // so the honest delta is zero and a document still claiming 25 is claiming a rule nobody applies.
   assert.equal(d?.document, "25");
   assert.equal(d?.recomputed, "0");

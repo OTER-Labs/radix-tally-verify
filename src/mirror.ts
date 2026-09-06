@@ -1,6 +1,6 @@
 /**
- * Mirror-tally verification (`plan-w1-mirror-tallies.md` §1, §3, §6): the extra checks a
- * document carrying `ballot_source` gets on top of the ordinary v20 pipeline.
+ * Mirror-tally verification: the extra checks a document carrying `ballot_source` gets on top of
+ * the ordinary pipeline.
  *
  * A mirror document publishes TWO tallies of the SAME on-chain ballots — the official Radix DAO
  * Consultation App's own rule (direct XRD, every active validator's LSUs, LSULP and its static
@@ -31,11 +31,10 @@
  *       verified against a list it supplied itself would be verified against nothing.
  *   (d) **`ballots_outside_window`** — how many re-read ballots landed outside the window this
  *       document was pinned to. Both bounds are resolved from `official_start` / `official_deadline`
- *       via the SAME Gateway timestamp selector the reference engine's `state_version_at`
- *       (`backend/src/tally_engine.rs`) uses, ported here rather than approximated — see
- *       `resolveStateVersionAtTimestamp` and `count_outside_window`'s Rust counterpart in
- *       `backend/src/official_tally.rs`, whose open-window convention (`deadline_state_version =
- *       i64::MAX` while `official_deadline` is still in the future) this mirrors exactly.
+ *       via the SAME Gateway timestamp selector the reference engine's own state-version lookup
+ *       uses, ported here rather than approximated — see `resolveStateVersionAtTimestamp` and
+ *       `ballotsOutsideWindow` below, whose open-window convention (an unbounded upper bound
+ *       while `official_deadline` is still in the future) mirrors the engine's exactly.
  *   (e) **`weight_delta_by_source`** — the per-source gap between the two rules, OTER-rule
  *       weight minus official-rule weight over the same participating accounts. Zero on every
  *       source where the DAO's register and the app's allowlist name the same positions; signed,
@@ -161,8 +160,8 @@ export interface OfficialBallot {
  * component state → `temperature_checks` / `proposals` KVS → the entry named by `official_id`.
  *
  * The entry is located by paging the register's keys and decoding each as a U64 until one
- * matches — the register carries only a handful of entries in practice (7 Temperature Checks, 3
- * Proposals, per `plan-w1-mirror-tallies.md` §6), so a full page walk is cheap, and it means the
+ * matches — the register carries only a handful of entries in practice (single-digit counts of
+ * Temperature Checks and Proposals), so a full page walk is cheap, and it means the
  * matched key is used EXACTLY as the keys endpoint returned it for the follow-up data read,
  * rather than this module guessing the Gateway's `programmatic_json` encoding of a U64 key.
  */
@@ -246,7 +245,7 @@ export async function readOfficialEntry(
  * `["Against", "For"]` (Temperature Check) or raw option indices (Proposal).
  *
  * Temperature Check: `TemperatureCheckVoterEntry { vote: Enum TemperatureCheckVote }`, `For` is
- * variant 0 and `Against` is variant 1 (`plan-w1-mirror-tallies.md` §6) — the OPPOSITE of the
+ * variant 0 and `Against` is variant 1 in the official component's own enum — the OPPOSITE of the
  * Poll option order this mirror publishes, so the mapping inverts: `For` -> `[1]`, `Against` ->
  * `[0]`.
  * Proposal: `ProposalVoterEntry { options: Array<Tuple ProposalVoteOptionId(U32)> }` — each
@@ -359,9 +358,8 @@ function sumLegs(
  * gated by `ballot_source`'s own absolute `official_quorum` / `official_approval_threshold`.
  *
  * Assumes a binary Approve/Reject bar — every mirror document this tool has seen publishes one,
- * matching the official component's own Temperature-Check and binary-Proposal shape
- * (`plan-w1-mirror-tallies.md` §6) — and refuses (MALFORMED) rather than guess at a multi-select
- * official bar the plan does not specify.
+ * matching the official component's own Temperature-Check and binary-Proposal shape — and refuses
+ * (MALFORMED) rather than guess at a multi-select official bar nothing specifies.
  */
 function officialRuleFigures(
   ballots: Map<string, number[]>,
@@ -400,9 +398,8 @@ function officialRuleFigures(
 }
 
 /**
- * Unix seconds -> ISO 8601. The engine's `state_version_at` builds its timestamp with
- * `chrono::DateTime::to_rfc3339()`, which spells the UTC offset `+00:00`; `Date.toISOString()`
- * spells it `Z`. Both are the same instant in the same standard, and the Gateway's timestamp
+ * Unix seconds -> ISO 8601. The reference engine builds its timestamp with an RFC 3339
+ * formatter that spells the UTC offset `+00:00`; `Date.toISOString()` spells it `Z`. Both are the same instant in the same standard, and the Gateway's timestamp
  * selector parses either — this is a spelling difference, not a semantic one.
  */
 function isoFromUnixSeconds(seconds: number): string {
@@ -412,11 +409,10 @@ function isoFromUnixSeconds(seconds: number): string {
 /**
  * The last ledger state at or before `unixSeconds`, via the Gateway's timestamp selector.
  *
- * This is the SAME call the reference engine's `state_version_at` makes
- * (`backend/src/tally_engine.rs` ~:3380), ported rather than approximated: XRD is used as the
- * anchor address exactly as the engine uses `XRD_RESOURCE_ADDRESS`, since any well-known entity
- * works and the entity's own data is never read — only the response envelope's
- * `ledger_state.state_version` is wanted.
+ * This is the SAME call the reference engine's own state-version lookup makes, ported rather
+ * than approximated: XRD is used as the anchor address exactly as the engine uses the native XRD
+ * resource, since any well-known entity works and the entity's own data is never read — only the
+ * response envelope's `ledger_state.state_version` is wanted.
  */
 async function resolveStateVersionAtTimestamp(
   gw: GatewayClient,
@@ -437,8 +433,8 @@ async function resolveStateVersionAtTimestamp(
 
 /**
  * How many re-read ballots landed outside the window this document is pinned to, in
- * STATE-VERSION terms — ported from the reference engine's `count_outside_window`
- * (`backend/src/official_tally.rs`), not approximated:
+ * STATE-VERSION terms — ported from the reference engine's own outside-window count, not
+ * approximated. Its stated reasoning, which this implementation keeps:
  *
  * "Compared as STATE VERSIONS rather than timestamps, because the gateway offers a
  * timestamp -> state-version selector and no cheap inverse: resolving one timestamp per ballot
@@ -447,9 +443,9 @@ async function resolveStateVersionAtTimestamp(
  *
  * Both bounds are themselves resolved from `official_start` / `official_deadline` by
  * {@link resolveStateVersionAtTimestamp} — the caller's job, not this pure function's, exactly as
- * the engine separates `count_outside_window` (the comparison) from the two `state_version_at`
- * calls that produce its bounds. `upperBoundSv` is `Number.MAX_SAFE_INTEGER` while the deadline is
- * still in the future (the engine's `deadline_state_version = i64::MAX`): there is no ledger state
+ * the engine separates the comparison from the two timestamp lookups that produce its bounds.
+ * `upperBoundSv` is `Number.MAX_SAFE_INTEGER` while the deadline is still in the future (the
+ * engine uses its own signed-64-bit maximum as the same sentinel): there is no ledger state
  * after a future deadline to resolve, so an open vote reports zero late ballots rather than every
  * ballot as late.
  */
@@ -571,7 +567,7 @@ export async function verifyMirrorBallots(
   check("ballot_source.(b) official_rule.totals_by_source.shape_pools", bs.officialRule.totalsBySource.shapePools.toString(), officialSum.shapePools.toString());
 
   // (d) ballots outside the window: both bounds resolved from the official timestamps via the
-  // SAME Gateway timestamp selector the engine's `state_version_at` uses — see
+  // SAME Gateway timestamp selector the engine's own state-version lookup uses — see
   // `resolveStateVersionAtTimestamp` and `ballotsOutsideWindow` above. `vote_start_state_version`
   // is always resolved (a ballot's window cannot open in the future); `deadline_state_version` is
   // unbounded while `official_deadline` has not yet passed.
@@ -579,7 +575,7 @@ export async function verifyMirrorBallots(
   const nowSeconds = Math.floor(Date.now() / 1000);
   const upperBoundSv =
     bs.officialDeadline > nowSeconds
-      ? Number.MAX_SAFE_INTEGER // the engine's i64::MAX: the window is still open
+      ? Number.MAX_SAFE_INTEGER // the engine's own unbounded sentinel: the window is still open
       : await resolveStateVersionAtTimestamp(gw, xrdResource, bs.officialDeadline);
   const outsideWindow = ballotsOutsideWindow(ballots, lowerBoundSv, upperBoundSv);
   check("ballot_source.(d) ballots_outside_window", String(bs.ballotsOutsideWindow), String(outsideWindow));

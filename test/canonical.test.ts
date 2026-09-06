@@ -1,11 +1,10 @@
 /**
  * Cross-implementation agreement tests.
  *
- * The golden vector below is NOT computed by this package. It is the value the Rust implementation
- * pins in `backend/src/tally_engine.rs::the_golden_document_hashes_to_its_pinned_value`. Two
- * independent implementations agreeing on it is the entire point — it is what turns
- * `docs/canonical-tally-serialization.md` from a description of one codebase's behaviour into a
- * specification something else can be written against.
+ * The golden vector below is NOT computed by this package. It is the value the reference
+ * implementation pins in its own test suite. Two independent implementations agreeing on it is
+ * the entire point — it is what turns the canonical-serialization spec from a description of one
+ * codebase's behaviour into a specification something else can be written against.
  *
  * If this test fails, do not "fix" the constant. One of the two implementations has departed from
  * the spec, and which one it is has to be established before either is trusted.

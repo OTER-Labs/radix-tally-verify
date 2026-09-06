@@ -45,9 +45,9 @@ export interface GatewayClient {
    * POST /state/entity/details at a TIMESTAMP selector rather than a `state_version` — the
    * Gateway's timestamp -> state-version resolver. The only thing wanted back is the response
    * envelope's `ledger_state.state_version`; any well-known entity works as the address, since
-   * the entity's own data is not read. This is the SAME call the reference engine's
-   * `state_version_at` makes (`backend/src/tally_engine.rs`), ported here rather than
-   * approximated, for the mirror-tally window bounds (`src/mirror.ts`) — the two Gateway
+   * the entity's own data is not read. This is the SAME call the reference engine's own
+   * state-version lookup makes, ported here rather than approximated, for the mirror-tally
+   * window bounds (`src/mirror.ts`) — the two Gateway
    * endpoints this tool otherwise reads (`entityDetails` above, and everything below) are always
    * pinned to an explicit `state_version` on purpose; this is the one deliberate exception,
    * because the window bounds are a TIMESTAMP by definition (`official_start` /

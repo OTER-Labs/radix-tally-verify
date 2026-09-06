@@ -2,10 +2,10 @@
  * The two CONCENTRATED-LIQUIDITY legs (tally document v17).
  *
  * The numbers pinned here are not this package's own output. The mainnet position vector and the
- * shape-pool claim figures are the ones the reference implementation pins in
- * `backend/src/tally_engine.rs`, and the point of restating them in a second language is the
- * same as the golden vector's: two implementations that agree on them turn `WEIGHT_RULE` into a
- * specification rather than a description of one codebase's arithmetic.
+ * shape-pool claim figures are the ones the reference implementation pins in its own test suite,
+ * and the point of restating them in a second language is the same as the golden vector's: two
+ * implementations that agree on them turn the published `weight_rule` text into a specification
+ * rather than a description of one codebase's arithmetic.
  *
  * If one of these fails, do not adjust the constant. Establish which implementation departed
  * from the rule first.

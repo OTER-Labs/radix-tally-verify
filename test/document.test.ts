@@ -182,7 +182,7 @@ test("weight_sources.membership without a resource is MALFORMED", () => {
 });
 
 // ---------------------------------------------------------------------------------------
-// The v22 golden vector (backend `tally_engine.rs::the_v22_space_keys_hash_to_their_pinned_value`).
+// The v22 golden vector — the value the reference implementation pins for the four space keys.
 //
 // This is NOT parsed through parseTallyDocument — like the reference test it reproduces, it
 // pins the canonical BYTES of the four new keys directly, so the shape a challenger recomputes

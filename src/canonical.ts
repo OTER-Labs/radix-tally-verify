@@ -1,9 +1,9 @@
 /**
  * Canonical JSON serialization and the tally hash.
  *
- * Implements `docs/canonical-tally-serialization.md` from the specification, not by copying the
- * Rust. That is the whole point of this package: if the two implementations agree, the spec is a
- * standard; if only one exists, the spec is a description of that one's behaviour.
+ * Implements the published canonical-serialization specification from its TEXT, not by copying
+ * the reference implementation. That is the whole point of this package: if the two agree, the
+ * spec is a standard; if only one exists, the spec is a description of that one's behaviour.
  *
  * The four rules, restated so this file can be read on its own:
  *   1. no insignificant whitespace

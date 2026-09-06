@@ -77,9 +77,9 @@ export interface Ballot {
 export interface VerdictSpec {
   kind: string;
   /** Mirror documents (`ballot_source` present) are `kind: "Poll"` yet publish the binary
-   * verdict fields — the engine's `official_tally` treats any TWO-option official vote as
-   * binding, with the affirmative side at `For` (index 1) for a temperature check and at
-   * option 0 for a proposal (`OfficialKind::binary_sides`). Set from `ballot_source.kind`;
+   * verdict fields — the mirror rule treats any TWO-option official vote as binding, with the
+   * affirmative side at `For` (index 1) for a temperature check and at option 0 for a proposal.
+   * Set from `ballot_source.kind`;
    * absent on every non-mirror document. */
   binarySides?: { affirmative: number; negative: number } | undefined;
   /** Width of the option space — the document's `totals` length. For a Majority Judgment

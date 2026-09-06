@@ -418,11 +418,12 @@ official bar for a Proposal — so check (b) refuses (MALFORMED) rather than gue
 bounds are resolved from `official_start` / `official_deadline` — timestamps — via the Gateway's
 timestamp selector (`POST /state/entity/details` with `at_ledger_state: { timestamp }`, XRD as the
 anchor address since any well-known entity works and its data is never read): the SAME call the
-engine's `state_version_at` makes (`backend/src/tally_engine.rs`), and the SAME comparison its
-`count_outside_window` makes (`backend/src/official_tally.rs`) — a ballot's own
+engine's own state-version lookup makes, and the SAME comparison its outside-window count makes
+— a ballot's own
 `last_updated_at_state_version` outside `[start_state_version, deadline_state_version]` counts as
 late. `deadline_state_version` is unbounded while `official_deadline` is still in the future (the
-engine's `deadline_state_version = i64::MAX`): there is no ledger state after a future deadline to
+engine's own unbounded `deadline_state_version` sentinel): there is no ledger state after a future
+deadline to
 resolve, so an open vote reports zero late ballots rather than every ballot as late.
 
 An earlier version of this check bounded the window by `[snapshot_state_version,
@@ -449,7 +450,7 @@ component_rdx1czn9hrgd30x742k6jw2e6psj9jlkqvu2cj4hcry60p7f38hxd3k3xt   Governanc
               -> { vote_id: 50, vote: For (variant 0) }, last_updated_at_state_version 542970896
 ```
 
-`For` is variant 0 and `Against` is variant 1 (`plan-w1-mirror-tallies.md` §6) — the OPPOSITE of
+`For` is variant 0 and `Against` is variant 1 in the official component's own enum — the OPPOSITE of
 the Poll option order `["Against", "For"]` a mirror document publishes, so `src/mirror.ts` inverts
 the mapping: `For -> [1]`, `Against -> [0]`.
 
@@ -497,10 +498,22 @@ npm test
 
 ## The specification
 
-The canonical encoding is specified in `docs/canonical-tally-serialization.md`, alongside the
-reference implementation. Four rules make the encoding a function of the content: no insignificant
-whitespace; object keys ascending by UTF-8 byte sequence at every level; every quantity that is not
-a small integer is a JSON **string**; arrays keep their order.
+The canonical encoding is published as a written specification alongside the reference
+implementation, and `src/canonical.ts` in this package implements it from that text rather than by
+copying the reference code — which is the whole point of the exercise: if the two agree, the spec
+is a standard; if only one exists, the spec is a description of that one's behaviour.
+
+Four rules make the encoding a function of the content:
+
+1. no insignificant whitespace;
+2. object keys ascending by UTF-8 **byte** sequence, at every level (not UTF-16 code-unit order,
+   which disagrees above U+FFFF);
+3. every quantity that is not a small integer is a JSON **string** — an 18-decimal fixed-point
+   Decimal in its minimal form: no trailing zeros, no exponent, and no decimal point when there is
+   no fractional part;
+4. arrays keep their order — it is content, never sorted.
+
+The hash is `blake2b-256` over the UTF-8 bytes of that form, lowercase hex.
 
 ## Scope
 

@@ -537,8 +537,8 @@ export async function computeAccountWeightBreakdown(
   // holders and a `Membership` space's is one badge's holders, so running the XRD walk first and
   // then ignoring it would be both wrong and an order of magnitude of Gateway calls nobody needs.
   // Which one applies is carried in the document's own `weight_sources`, so a challenger reads
-  // the branch taken rather than inferring it — mirrors the reference engine's
-  // `compute_account_weight_breakdowns` exactly.
+  // the branch taken rather than inferring it — mirrors the reference engine's own
+  // per-account weight walk exactly.
   if (sources.fungible !== undefined) {
     const resource = sources.fungible.resource;
     const balances = await fetchFungiblesAt(gw, accounts, snapshotStateVersion);

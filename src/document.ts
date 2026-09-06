@@ -1,8 +1,8 @@
 /**
  * The tally document, parsed and checked.
  *
- * The shape is derived from the reference engine's `compute_tally` — the field set it
- * writes is the contract — not from guesswork. Fields the verifier only needs to carry (they
+ * The shape is derived from the reference engine's own tally output — the field set it writes is
+ * the contract — not from guesswork. Fields the verifier only needs to carry (they
  * are hashed but not recomputable off-ledger, like the ballots themselves, the title, or the
  * creation-time `eligible_voting_power`) stay in the raw object; fields the verdict is
  * derived from are parsed into `Dec` here so a malformed number fails fast as a MALFORMED
@@ -63,9 +63,10 @@ import type {
  *     replaces the whole XRD sum with — not an extra leg added on top, but the sole source, so a
  *     Fungible or Membership document's every other leg is off. No shape change to anything else.
  *
- *   - **mirror tallies** (`plan-w1-mirror-tallies.md` §3) — the additive `ballot_source` block
+ *   - **mirror tallies** — the additive `ballot_source` block
  *     that turns a document into a reproduction of an official Radix DAO Temperature Check or
- *     Proposal, with its own `mirror_doc_version` (currently 1) so it can grow independently of
+ *     Proposal, with its own `mirror_doc_version` (see `SUPPORTED_MIRROR_DOC_VERSION` below) so
+ *     that it can grow independently of
  *     `TALLY_DOC_VERSION`. No bump here: bumping 20 for this would trip the on-chain
  *     `weight_source_set` gate for a field that is purely additive. See `src/mirror.ts`.
  *
@@ -97,8 +98,9 @@ export type WeightConfig =
   | { kind: "Membership"; resource: string };
 
 /**
- * The two kinds of official Radix DAO vote a mirror document can reproduce (`plan-w1-mirror-tallies.md`
- * §3, §6).
+ * The two kinds of official Radix DAO vote a mirror document can reproduce: the Consultation
+ * App's Temperature Checks and its Proposals, each held in its own key-value store on the
+ * `Governance` component.
  */
 export type MirrorKind = "temperature_check" | "proposal";
 
@@ -153,8 +155,8 @@ export interface WeightDeltaBySource {
 }
 
 /**
- * The additive `ballot_source` block (plan `plan-w1-mirror-tallies.md` §3) that turns an ordinary
- * v20 tally document into a MIRROR of an official Radix DAO Temperature Check or Proposal.
+ * The additive `ballot_source` block that turns an ordinary tally document into a MIRROR of an
+ * official Radix DAO Temperature Check or Proposal.
  *
  * Presence, not a flag, is what makes a document a mirror (`TallyDocument.isMirror`) — the same
  * field-presence discipline every other leg in this file follows. Nothing here changes
@@ -320,7 +322,7 @@ export interface TallyDocument {
   rejectWeight: Dec | null;
   approved: boolean | null;
   /**
-   * The mirror-tally block (`plan-w1-mirror-tallies.md` §3), or `null` on an ordinary document.
+   * The mirror-tally block, or `null` on an ordinary document.
    * `isMirror` is exactly `ballotSource !== null` — presence is the switch, not a separate flag
    * that could disagree with it.
    */
