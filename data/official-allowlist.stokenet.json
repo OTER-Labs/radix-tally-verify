@@ -1,0 +1,10 @@
+{
+  "schema": "oter-official-allowlist/1",
+  "network": "stokenet",
+  "version": "2026-09-06",
+  "source_url": "https://vote.radixdao.org/about/voting-power",
+  "source_bundle": null,
+  "fetched_at": "2026-09-06T00:00:00Z",
+  "note": "Stokenet runs no Radix DAO Consultation App, so there is no published allowlist to transcribe: this file states the same POLICY over the entities a stokenet stack actually has. The four categories are identical to mainnet's — direct XRD, the LSUs of every active validator, LSULP, and a static list of DEX positions — and the first two are Tier 1, counted unconditionally by the weight engine and never entries here. The remaining two are EMPTY because Ociswap, CaviarNine and DefiPlaza have no stokenet deployment: the consultation registry is instantiated there declaring pool DISCOVERY and no named weight source (\"a test stack with nothing to name may pass true and no entries\"), so the platform's own register on that network is XRD + every validator LSU + discovered native pool units, while this allowlist is XRD + every validator LSU and nothing else. That difference is deliberate and is what makes the official leg exercisable on a test stack: a validator stake weighs the SAME under both rules (zero delta on the lsu source, because LSUs are Tier 1 in both), and a native pool unit — discovered by the register, absent from this allowlist — is a positive pool_units delta and zero everywhere else. An empty entries list is a statement, not a placeholder: it is what the official rule counts on this network.",
+  "entries": []
+}

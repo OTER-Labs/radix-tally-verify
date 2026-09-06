@@ -102,20 +102,47 @@ export type WeightConfig =
  */
 export type MirrorKind = "temperature_check" | "proposal";
 
-/** The document's claim about what the OFFICIAL rule (liquid XRD only) found — recomputed and
- * compared against the same absolute `official_quorum` / `official_approval_threshold`. */
+/** The official rule's total split the same six ways an OTER-rule weight is. `liquid` is the
+ * plain XRD balance; the other five are the sources the app's own policy counts. */
+export interface OfficialTotalsBySource {
+  liquid: Dec;
+  lsu: Dec;
+  lsulp: Dec;
+  poolUnits: Dec;
+  precisionPools: Dec;
+  shapePools: Dec;
+}
+
+/**
+ * The document's claim about what the OFFICIAL rule found — the Consultation App's own policy
+ * (direct XRD, every active validator's LSUs, LSULP, and the positions on its static DEX
+ * allowlist), recomputed and compared against the same absolute `official_quorum` /
+ * `official_approval_threshold`.
+ *
+ * `allowlistVersion` and `allowlistHash` name the list it was weighed under. They are what make
+ * that leg checkable at all: the verifier ships its own copy of the list, recomputes the hash,
+ * and reports a mismatch rather than taking the document's word for which positions counted.
+ */
 export interface OfficialRuleClaim {
   rule: string;
+  allowlistVersion: string;
+  allowlistHash: string;
   totals: Dec[];
+  totalsBySource: OfficialTotalsBySource;
   totalWeight: Dec;
   quorumMet: boolean;
   approved: boolean;
 }
 
 /**
- * The per-leg gap between the OTER-rule total and the official-rule total (mirror-tally
- * `weight_delta_by_source`) — what each non-liquid-XRD source, plus delegation, added on top of
- * the official rule's plain balance read.
+ * The per-source gap between the two rules (mirror-tally `weight_delta_by_source`): OTER-rule
+ * weight MINUS official-rule weight, over the accounts whose weight entered the OTER total.
+ *
+ * Zero on a source where the DAO's on-ledger register and the app's static allowlist name the
+ * same positions — which is most of them, most of the time. SIGNED: positive where the register
+ * counts a position the allowlist does not, negative the other way round. There is no `liquid`
+ * row because a balance is not a listed source and both rules count it at par, and no delegation
+ * row because a mirror document resolves no delegation.
  */
 export interface WeightDeltaBySource {
   lsu: Dec;
@@ -123,7 +150,6 @@ export interface WeightDeltaBySource {
   lsulp: Dec;
   precisionPools: Dec;
   shapePools: Dec;
-  delegationNet: Dec;
 }
 
 /**
@@ -699,6 +725,18 @@ function parseGradeQuantile(mjRaw: unknown): GradeQuantile | null {
 
 const MIRROR_KINDS: readonly MirrorKind[] = ["temperature_check", "proposal"];
 
+/**
+ * The `ballot_source` block version this verifier implements.
+ *
+ * Version 1's official leg was "liquid XRD balance at snapshot_state_version" — a rule the
+ * Consultation App had already stopped applying by the time version 2 was written. A version-1
+ * document is REFUSED rather than checked, for the same reason a `weight_source_set` written for
+ * another tally rule is refused on-ledger: recomputing it under version 2's rule would compare a
+ * number against a rule that did not produce it, and every difference reported after that would
+ * be an artefact of the verifier, not evidence about the document.
+ */
+export const SUPPORTED_MIRROR_DOC_VERSION = 2;
+
 function parseOfficialRuleClaim(raw: unknown): OfficialRuleClaim {
   const o = asObject(raw);
   const rule = asString(o["rule"]);
@@ -716,9 +754,20 @@ function parseOfficialRuleClaim(raw: unknown): OfficialRuleClaim {
       );
     }
   });
+  const bySource = asObject(o["totals_by_source"]);
   return {
     rule: rule as string,
+    allowlistVersion: reqString(o, "allowlist_version"),
+    allowlistHash: reqString(o, "allowlist_hash"),
     totals,
+    totalsBySource: {
+      liquid: reqDec(bySource, "liquid"),
+      lsu: reqDec(bySource, "lsu"),
+      lsulp: reqDec(bySource, "lsulp"),
+      poolUnits: reqDec(bySource, "pool_units"),
+      precisionPools: reqDec(bySource, "precision_pools"),
+      shapePools: reqDec(bySource, "shape_pools"),
+    },
     totalWeight: reqDec(o, "total_weight"),
     quorumMet: reqBool(o, "quorum_met"),
     approved: reqBool(o, "approved"),
@@ -733,7 +782,6 @@ function parseWeightDeltaBySource(raw: unknown): WeightDeltaBySource {
     lsulp: reqDec(o, "lsulp"),
     precisionPools: reqDec(o, "precision_pools"),
     shapePools: reqDec(o, "shape_pools"),
-    delegationNet: reqDec(o, "delegation_net"),
   };
 }
 
@@ -749,8 +797,17 @@ function parseBallotSource(raw: unknown): BallotSource | null {
   if (kind === null || !(MIRROR_KINDS as readonly string[]).includes(kind)) {
     fail("ballot_source.kind", `is missing or not one of ${JSON.stringify(MIRROR_KINDS)}`);
   }
+  const mirrorDocVersion = reqInt(o, "mirror_doc_version");
+  if (mirrorDocVersion !== SUPPORTED_MIRROR_DOC_VERSION) {
+    fail(
+      "ballot_source.mirror_doc_version",
+      `is ${mirrorDocVersion}; this verifier implements ${SUPPORTED_MIRROR_DOC_VERSION}. Version 1 ` +
+        `documents state the official rule as liquid XRD only, which is not the rule the ` +
+        `Consultation App applies, so their official leg cannot be recomputed here`,
+    );
+  }
   return {
-    mirrorDocVersion: reqInt(o, "mirror_doc_version"),
+    mirrorDocVersion,
     component: reqString(o, "component"),
     blueprint: reqString(o, "blueprint"),
     kind: kind as MirrorKind,

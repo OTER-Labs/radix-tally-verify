@@ -87,9 +87,10 @@ noise:
   valid-ballots-only Participation rule, delegated weight riding the ballot it attached to, and
   the three seat rules (Plurality, SPAV, Majority Judgment) applied from the document's own
   stated parameters, down to the Grade Quantile it publishes.
-- **`src/mirror.ts`** — mirror-tally verification (`ballot_source` present): re-reading the
-  official Radix DAO component's own ballots, the official (liquid-XRD-only) rule, the
-  outside-window count, and the per-leg weight delta. See "Mirror tallies" below.
+- **`src/mirror.ts`** and **`src/allowlist.ts`** — mirror-tally verification (`ballot_source`
+  present): re-reading the official Radix DAO component's own ballots, recomputing the
+  Consultation App's own rule from the static allowlist this package ships under `data/`, the
+  outside-window count, and the per-source gap between the two rules. See "Mirror tallies" below.
 - **`src/verify.ts` / `src/cli.ts`** — orchestration and the command line. `--mirror` is not a
   flag: a document carrying `ballot_source` gets the extra checks automatically.
 - **`test/`** — cross-implementation agreement, plus weight, concentrated-liquidity, delegation
@@ -117,6 +118,10 @@ are switched on. Every leg below is recomputed from Gateway historical state at 
 And the verdict, in full: quorum on both legs, the Binding gates, the DAO-controlled-funds bar,
 Majority Judgment's qualifying grades and gauges at the document's own quantile, `invalid_ballots`,
 the withdrawn-candidate exclusion, and every seat allocation.
+
+A **mirror** document runs every leg above twice — once under the register it carries, once under
+the official Consultation App's own allowlist — and resolves no delegation at all. See "Mirror
+tallies" below.
 
 ## Spaces (tally document v22)
 
@@ -303,32 +308,87 @@ index in that list must not accuse a voter of malformity on a ballot nobody read
 ## Mirror tallies of official Radix DAO votes
 
 For every Temperature Check and Proposal on the official Radix DAO Consultation App component,
-OTER can publish a document that reads the SAME on-chain ballots and tallies them twice: the
-**official rule** (liquid XRD only, reproducing their published number and proving the same
-ballots were read) and the **OTER rule** (this platform's `WEIGHT_RULE`). Both are gated by the
-official vote's own absolute `quorum` and `approval_threshold`, so the only thing the two results
-can disagree about is the weight function.
+OTER can publish a document that reads the SAME on-chain ballots and tallies them twice: under the
+**official rule** — the Consultation App's own policy, which reproduces their published number and
+so proves the same ballots were read — and under the **OTER rule**, that platform's own
+`WEIGHT_RULE`. Both are gated by the official vote's own absolute `quorum` and
+`approval_threshold`, so the only thing the two results can disagree about is the weight function.
+
+### What the official rule is
+
+The Consultation App states it on `vote.radixdao.org/about/voting-power`. At the snapshot it
+counts, and values in XRD:
+
+1. **direct XRD** — "1 XRD equals 1 vote";
+2. **validator LSUs** — "LSUs from every active Radix validator count for their underlying XRD
+   value", every validator, with no list;
+3. **LSULP** — at its underlying liquid-staked XRD value;
+4. **a static allowlist of DEX liquidity positions** — "This is the current static allowlist used
+   when a vote is snapshotted." Only the XRD, LSU or LSULP side of a position counts; the other
+   token in the pair adds nothing.
+
+(1) and (2) are the governance framework's Tier 1 and cannot be removed; (3) and (4) are its
+Tier 2, changeable by the DAO's own process. The list behind (4) is hard-coded in the app's
+JavaScript bundle rather than published as a file, so this package ships a transcription of it:
+
+```
+data/official-allowlist.mainnet.json    69 entries — the LSULP pair plus the app's 68 positions:
+                                        Ociswap V1 4 + V2 10 precision receipts, Ociswap Basic 4
+                                        + Flex 1, CaviarNine Simple 11 + HLP 1 pool units,
+                                        CaviarNine Shape 15 receipts, DefiPlaza Base 11 + Quote 11
+data/official-allowlist.stokenet.json   empty — none of those DEXes deploys to the test network,
+                                        so the official rule there is XRD + validator LSUs alone
+```
+
+Which file applies is decided by the official component's own bech32 prefix, so the ballots, the
+balances and the allowlist always come from one network with nothing to configure.
+
+**The list travels with the verifier, never with the document.** A mirror document names the list
+it was weighed under — `official_rule.allowlist_version` and `allowlist_hash`, a blake2b-256 over
+the canonical JSON of the list's `entries` — and check (b) recomputes that hash from this
+package's own copy. A verifier that took the list from the document would be checking a claim
+against itself. When the app changes its allowlist, a new version of this package ships a new
+file, and documents weighed under the old list stop verifying against the new one; that is the
+correct outcome, and it is why the version is published at all.
+
+### The document block
 
 This is **additive** — no `TALLY_DOC_VERSION` bump. A mirror document carries everything an
-ordinary v20 document does (`votes`, `totals`, `total_weight`, `quorum`, `approved`, …), holding
+ordinary v22 document does (`votes`, `totals`, `total_weight`, `quorum`, `approved`, …), holding
 the OTER-rule result exactly as an ordinary Poll would, plus one extra block:
 
 ```json
 "ballot_source": {
-  "mirror_doc_version": 1,
+  "mirror_doc_version": 2,
   "component": "component_rdx1…", "blueprint": "Governance",
   "kind": "temperature_check" | "proposal", "official_id": 5,
   "official_start": 1784999200, "official_deadline": 1785431200,
   "official_quorum": "402876916", "official_approval_threshold": "0.5",
   "official_vote_count": 51, "official_revote_count": 3,
   "ballot_count": 48, "ballot_state_version": 542970896, "ballots_outside_window": 0,
-  "official_rule": { "rule": "liquid XRD balance at snapshot_state_version",
+  "official_rule": { "rule": "The Radix DAO Consultation App's own rule at snapshot_state_version: …",
+                      "allowlist_version": "2026-09-06", "allowlist_hash": "bfadafb5…",
                       "totals": ["…", "…"], "total_weight": "…",
+                      "totals_by_source": { "liquid": "…", "lsu": "…", "lsulp": "…",
+                                            "pool_units": "…", "precision_pools": "…",
+                                            "shape_pools": "…" },
                       "quorum_met": true, "approved": true },
   "weight_delta_by_source": { "lsu": "…", "pool_units": "…", "lsulp": "…",
-                               "precision_pools": "…", "shape_pools": "…", "delegation_net": "…" }
+                               "precision_pools": "…", "shape_pools": "…" }
 }
 ```
+
+`weight_delta_by_source` is **OTER-rule weight minus official-rule weight, per source**, over the
+accounts whose weight entered the OTER total. Every leg is zero on a source where the DAO's
+on-ledger register and the app's allowlist name the same positions — which, on mainnet as of the
+version shipped here, is all of them. The values are signed: positive where the register counts a
+position the allowlist does not, negative the other way round. There is no `liquid` leg, because a
+balance is not a listed source and both rules count it at par.
+
+`mirror_doc_version` **1 is refused, not checked.** Those documents state the official rule as
+liquid XRD only. Recomputing one under the rule above would compare a number against a rule that
+did not produce it, and every difference reported after that would say more about the verifier
+than about the document.
 
 **Its presence is the switch.** There is no `--mirror` flag: `radix-tally-verify` runs exactly as
 above, and a document carrying `ballot_source` gets five checks instead of one:
@@ -336,14 +396,18 @@ above, and a document carrying `ballot_source` gets five checks instead of one:
 | Check | What it does | Where a mismatch is reported |
 |---|---|---|
 | **(a)** the ballots | Re-reads the official component's own state — `temperature_checks` / `proposals` key-value store → the entry named by `official_id` → its `voters` key-value store, all at `ballot_state_version` — and compares every account's selection, plus the entry's own `quorum` / `approval_threshold` / `start` / `deadline` / `vote_count` / `revote_count`, against what `ballot_source` claims | `ballot_source.(a) …` |
-| **(b)** the official rule | Liquid XRD only (no LSU, no pool, no lsulp, no concentrated liquidity) at `snapshot_state_version`, summed per option, gated by `official_quorum` / `official_approval_threshold` | `ballot_source.(b) official_rule. …` |
+| **(b)** the official rule | Checks `allowlist_version` / `allowlist_hash` against this package's own copy of the list, then recomputes the app's policy — direct XRD, every active validator's LSUs, LSULP and the allowlisted positions — at `snapshot_state_version` with the same weight engine check (c) uses, handed the allowlist as its register; summed per option, gated by `official_quorum` / `official_approval_threshold`, and compared against the claimed totals and their `totals_by_source` split | `ballot_source.(b) official_rule. …` |
 | **(c)** the OTER rule | The ordinary v20 pipeline above, completely unchanged — this is why a mirror document's top-level fields are checked exactly as a Poll's would be | the usual unprefixed field names (`totals[…]`, `votes[…].weight`, `approved`, …) |
 | **(d)** the window | How many re-read ballots landed after the deadline or before the vote opened, both bounds resolved from `official_start` / `official_deadline` via the Gateway's timestamp selector — see below | `ballot_source.(d) ballots_outside_window` |
-| **(e)** the weight delta | The per-leg gap between the OTER-rule total and the official-rule total: what LSUs, native pool units, LSULP, the two concentrated-liquidity legs, and delegation each added | `ballot_source.(e) weight_delta_by_source. …` |
+| **(e)** the weight delta | The per-source gap between the two rules — OTER-rule weight minus official-rule weight over the same participating accounts, both sides from the same weight engine over the same account set. Zero wherever the register and the allowlist agree; signed where they do not | `ballot_source.(e) weight_delta_by_source. …` |
 
 Every mismatch is still an ordinary `Difference` in the same `figures` outcome the rest of this
 tool uses — there is no separate mirror outcome kind. The prefix names which of (a)–(e) is wrong
 without inventing a second vocabulary for it.
+
+Because both legs now go through one weight engine and differ only in the register handed to it,
+a difference between them is attributable: it is the two lists disagreeing, not two
+implementations of arithmetic disagreeing.
 
 **One thing this tool had to decide rather than derive, in `src/mirror.ts`:** the official rule is
 checked only as a binary Approve/Reject bar. Every mirror document observed on the official
@@ -393,10 +457,15 @@ The official Consultation App's own published result for this vote (a cross-chec
 `https://api-consultation.mountain-top.live/vote-results?type=temperature_check&entityId=5`, not
 something this tool reads) was `Against: 1,396,027.35…`, `For: 670,857,540.02…` — comfortably over
 quorum (402,876,916) and about 99.8% approval, so `official_rule.approved` would be `true`. The
-`totals` / `total_weight` / `weight_delta_by_source` figures in a real mirror document for this
-vote come from summing all 48 accounts' balances at the snapshot, which is what `computeAccountWeightBreakdown`
-does — not reproduced by hand here, and marked as **example values** in the `ballot_source` block
-above rather than presented as if they were live-computed.
+`totals` / `total_weight` / `totals_by_source` / `weight_delta_by_source` figures in a real mirror
+document for this vote come from running `computeAccountWeightBreakdown` over all 48 accounts at
+the snapshot twice, once under each register — not reproduced by hand here, and marked as
+**example values** in the `ballot_source` block above rather than presented as if they were
+live-computed.
+
+Note that this vote is one the app itself weighed BEFORE it caught up to the policy above: the
+allowlist shipped here is the one the app applies now, and a mirror of an older vote is a reading
+of those ballots under today's rule rather than a reconstruction of the number published then.
 
 ## Running it
 

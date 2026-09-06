@@ -1,0 +1,494 @@
+{
+  "schema": "oter-official-allowlist/1",
+  "network": "mainnet",
+  "version": "2026-09-06",
+  "source_url": "https://vote.radixdao.org/about/voting-power",
+  "source_bundle": "https://vote.radixdao.org/assets/index-CUg6pk3X.js",
+  "fetched_at": "2026-09-06T00:00:00Z",
+  "note": "The Radix DAO Consultation App (RADIXDAOv3, vote.radixdao.org) weighs a snapshot as: direct XRD; the LSUs of EVERY active validator at their underlying XRD; LSULP at its underlying liquid-staked XRD; and the XRD/LSU/LSULP side of the 68 DEX liquidity positions on this static allowlist — \"This is the current static allowlist used when a vote is snapshotted.\" XRD and the validator LSUs are Tier 1 and are counted unconditionally by the weight engine, so they are NOT entries here; the 68 positions plus the one LSULP pair are. Transcribed 2026-09-06 by extracting the hard-coded position arrays from the production bundle named in source_bundle (Ociswap V1 4 + V2 10 precision receipts, Ociswap Basic 4 + Flex 1, CaviarNine Simple 11 + HLP 1 pool units, CaviarNine Shape 15 receipts, DefiPlaza 11 Base + 11 Quote pool units = 68) and joined against the platform's own record of the same allowlist taken on 2026-08-22, whose components had been verified on mainnet by blueprint (TwoResourcePool 39, PrecisionPool 14, QuantaSwap 15). The two agreed exactly: no entry in either that the other lacks. This file is the OFFICIAL rule a mirror tally reproduces; the platform's own rule is its versioned on-ledger weight-source register, and the two are deliberately separate objects.",
+  "entries": [
+    {
+      "kind": "Lsulp",
+      "dex": "CaviarNine LSU Pool",
+      "pair": "LSULP",
+      "component": "component_rdx1cppy08xgra5tv5melsjtj79c0ngvrlmzl8hhs7vwtzknp9xxs63mfp",
+      "resource": "resource_rdx1thksg5ng70g9mmy9ne7wz0sc7auzrrwy7fmgcxzel2gvp8pj0xxfmf"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "CaviarNine HLP",
+      "pair": "LSULP/XRD (HLP)",
+      "component": "pool_rdx1chmckjpr0ks5lk6h7mqvmrw56wt4w6tsuy6n2jhd8fhr8vc5en5e90",
+      "resource": "resource_rdx1th0f0khh9g8hwa0qtxsarmq8y7yeekjnh4n74494d5zf4k5vw8qv6m"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "CaviarNine Simple",
+      "pair": "FLOOP/XRD",
+      "component": "pool_rdx1ch3vyhagpzqll4cu6quafdpkf7lvyuz7ke4z66tuqpxhvtxzd9lvmu",
+      "resource": "resource_rdx1th2pnc0lzgp20wwv2r22knjn32ntvecapws6v7z644c0d3rzz0fvng"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "CaviarNine Simple",
+      "pair": "REDDICKS/LSULP",
+      "component": "pool_rdx1chmx480a0crrnaqyg2e6tr7wtqwk5239grzs6ecckcmhqjm3gdmm73",
+      "resource": "resource_rdx1tkjspzkzmhyzxwcrjha3y2aapmg5690vayjehqtfa729jnr88hcaue"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "CaviarNine Simple",
+      "pair": "hBNB/XRD",
+      "component": "pool_rdx1c5v5l4ltfy2sgwel8a5x3dte82xgfchky5n8ppkxlm29ngm5hq6qaz",
+      "resource": "resource_rdx1thjv6ex5k66vylwaj59pjvrceg4k0ncf44hsu9aa8rqwgn37vkz7qm"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "CaviarNine Simple",
+      "pair": "hETH/XRD",
+      "component": "pool_rdx1chcefkz8qqlhl4tk6vm2ftwh7qmht8yru5cxwl0e5r444tw86vzjwd",
+      "resource": "resource_rdx1t5qpw4hf8k60mvn708c46rm7wu8st7kaqwy98nkf987fa2w7ue8kyz"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "CaviarNine Simple",
+      "pair": "hETH/XRD (v2)",
+      "component": "pool_rdx1ckw50qh8gry85hvq4ctdf95edns7gzeue4jx305td8cgttm8ljutd2",
+      "resource": "resource_rdx1tht9kj9vpdwhny77dn73lqx4ca2tut9yc5q752mhvgtcdhfzyzzn2s"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "CaviarNine Simple",
+      "pair": "hSOL/XRD",
+      "component": "pool_rdx1ckg7s8tlluauzxcv8axfl5l4adgzuwan40s7dcmkmwzkc87qletaj9",
+      "resource": "resource_rdx1tkjrw4dr0fyazpu9lql307xv26hy7a8p39m0f6de7ykk2um0965x6f"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "CaviarNine Simple",
+      "pair": "hSOL/XRD (v2)",
+      "component": "pool_rdx1c5dedvmk9nc6pzdk4x00l0r7aut4v2sw9r8lvwlau9rgnumqdvkzce",
+      "resource": "resource_rdx1tksrs4q8f0jv7uq5cnmv2n3snn3vvn62rmp67vthwg25qpaj9vhm88"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "CaviarNine Simple",
+      "pair": "hUSDC/XRD",
+      "component": "pool_rdx1c5dcv0r8tz0tzw8radv3grwvdj6jkya84c93k30mqmx70tyatlye0n",
+      "resource": "resource_rdx1tk9hawstw3k86c7qynvvr5tssttnsy4uurkz7d36fkz8cug9yw9925"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "CaviarNine Simple",
+      "pair": "hUSDC/XRD (v2)",
+      "component": "pool_rdx1ckgx9waann7djd7frcqevjxq7fh8tfdr5qvyz6ux7s0jkn03mgekkg",
+      "resource": "resource_rdx1t57hslzkmwlcz4fgy6p5xph7v83y6x6n8wjwkn0fphy8cvh6jyntyf"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "CaviarNine Simple",
+      "pair": "hwBTC/XRD",
+      "component": "pool_rdx1ck3ckkse8g2ct0ep4gcymctkfs56ff37lfwlg4w3ehwvgz64evlhf5",
+      "resource": "resource_rdx1thzkkqkeye5qzp5p4nweux47v2elz3v693dg6z20q2ayxaxmdjy52h"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "CaviarNine Simple",
+      "pair": "hwBTC/XRD (v2)",
+      "component": "pool_rdx1ckp8p90n89qjttl5qzyu6a4dugmxuxkxax4rfsye5fhp6j97jxxvj5",
+      "resource": "resource_rdx1t5x5jmvtwzz9wupx3gcatmq8e2d34kpk364jkhk9ydvwp5ag8t76xc"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "DefiPlaza Base",
+      "pair": "XRD/DFP2",
+      "component": "pool_rdx1chxn0nqj840r78t2ah5agchq4ue9p65q23nc9ckqfe0mmjstq8fyg0",
+      "resource": "resource_rdx1tknxlx2sy23qkg6twvnu3kqcd5l4daacq0n6mdam54upqgx50f4ju8"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "DefiPlaza Base",
+      "pair": "hBNB/XRD",
+      "component": "pool_rdx1ch0aecz95kl9vdvyz6q3zh4p6vcshefwakx3jfs3uk34y8sv8d8uvy",
+      "resource": "resource_rdx1t4d5n87gsq5vg0xlszyvmd8pgxv5a9nyrj7u9frgxcsy2gtgqk2d3h"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "DefiPlaza Base",
+      "pair": "hETH/XRD",
+      "component": "pool_rdx1ckfa8h47ghy8enmz29k6cxgl5x87qy3gkzetsw82fpuvrdzc6563q2",
+      "resource": "resource_rdx1tha0rthe4jgmwuz0074eazu3n8w2v8m5mpx453vq5ux7dqnaxz0y0g"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "DefiPlaza Base",
+      "pair": "hSOL/XRD",
+      "component": "pool_rdx1c4lrpucdyfhe52znmp3qe8jnjmnt25u6s4hhtz9k88ngju0urj5yy4",
+      "resource": "resource_rdx1tkuxyrqa6lzpsmh75v9af55v4q5gu35wxx0wh30lz6uqd265u0hgvq"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "DefiPlaza Base",
+      "pair": "hUSDC/XRD",
+      "component": "pool_rdx1chxzajmur7p67h0uvk7etgnm9m67ptzfv7ysfdvq35ck2zz6zuttqq",
+      "resource": "resource_rdx1t5qsyevr7ry54uxeh9s7nm6wjdan0c8ks63c2dmpdxsdumum2vsl82"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "DefiPlaza Base",
+      "pair": "hUSDT/XRD",
+      "component": "pool_rdx1ch5zj8tlarxz38kwh4ss3jn5mphd98rssalkmfut6mhzvswezzg3vd",
+      "resource": "resource_rdx1t46hgy2ut87zeu8jfv6k24d8l4s7mjwjdqsd2qnvu644gyc4l7g0xn"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "DefiPlaza Base",
+      "pair": "hwBTC/XRD",
+      "component": "pool_rdx1c5xdcsxjfpled776cl2ln2mdv9svh5sp4z8u3qhv5r5sslnuxul7rs",
+      "resource": "resource_rdx1tkaems6ywyrqrs7vk0fjk87s8sa2n0wcc4zzkyms04nu6mv739xpyd"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "DefiPlaza Base",
+      "pair": "xETH/XRD",
+      "component": "pool_rdx1ckt7dhmt5gr9vdsgz3p62fm88pm7f69kzzqw2268f3negvgns2xkpa",
+      "resource": "resource_rdx1t5k00sp4jejklp8cx6nw7ecvhz7z07mfexgmdyflgqpflfvzv8v7wd"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "DefiPlaza Base",
+      "pair": "xUSDC/XRD",
+      "component": "pool_rdx1c5z06xda4gjykyhupj4fjszdfhsye7h3mcsgwe5cvuz2vemwn7yjax",
+      "resource": "resource_rdx1tkdws0nvfwjnn2q62x4gqgelyt4t5z7cn58pwvrtf4zrxtdw2sem8x"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "DefiPlaza Base",
+      "pair": "xUSDT/XRD",
+      "component": "pool_rdx1c5pvssdmlgjh78anllzszh7alal666ayv8h6at3xmxmmpueqf7at4q",
+      "resource": "resource_rdx1thnmcry6e02x6ja73llm8z6pkrurvrsudgez4ammsp24r0v20rllxt"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "DefiPlaza Base",
+      "pair": "xwBTC/XRD",
+      "component": "pool_rdx1c5xlqz5uc62fzlsyl2f3ql6lx8upc75tdpe4f8cmys83lpqrrul976",
+      "resource": "resource_rdx1t4x7f34hec2jxtay6cvxvcq3skmkg9pwtr98m4dm7qfrvnaddlavgv"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "DefiPlaza Quote",
+      "pair": "XRD/DFP2",
+      "component": "pool_rdx1c4547fnprjhlp2m27aycmf8rzrkrfzcck58jt2706r85gpcaeapz7k",
+      "resource": "resource_rdx1t4a5clnxmnctmezaty08cuugfzmj2lezqcjk2szezrfdfl4w4ederu"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "DefiPlaza Quote",
+      "pair": "hBNB/XRD",
+      "component": "pool_rdx1c42dp3amx7el85vv588vxkqjn53rd8np30qyrpf5pk95uaalu057d4",
+      "resource": "resource_rdx1thhctpg6ctkr7pf4axk0p3ysuyu7574essvj8r8m2d7tf4709x9e6z"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "DefiPlaza Quote",
+      "pair": "hETH/XRD",
+      "component": "pool_rdx1chawt3wgkpe0jkdhgrysw9dducx3032nse8r9tfl4gsxfqp2z2alx5",
+      "resource": "resource_rdx1t4xldwkew79skplfk3lempg459xhlhzj5xy5r86jfjrud29lpalytd"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "DefiPlaza Quote",
+      "pair": "hSOL/XRD",
+      "component": "pool_rdx1c43fvtx682u76wz6agel9374sa93kzndkjvz7lh4mdqm8x649krvnq",
+      "resource": "resource_rdx1th7zlzjs0elh2pgr3ce4g8k4g4w2l2sfq27se78dghaqhcx6xq3c5w"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "DefiPlaza Quote",
+      "pair": "hUSDC/XRD",
+      "component": "pool_rdx1c5t2v0jac6sdyv9qs5hur76uc5kjr70sl8dftc5aa92k0tsuc06r04",
+      "resource": "resource_rdx1tkjvn5zek8aj34rmzd9vd5qtr35x4ytlud857cgnq066lzkc0mygzw"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "DefiPlaza Quote",
+      "pair": "hUSDT/XRD",
+      "component": "pool_rdx1ckvu5wqp2pc284yj7jssckueqtcvt72gjjwz4sv4rl5kdtk70etg2n",
+      "resource": "resource_rdx1t45t2dpdgydlrtpxejwm04uvn2dc8p7nmch8ffcd0vf25axd0aptdk"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "DefiPlaza Quote",
+      "pair": "hwBTC/XRD",
+      "component": "pool_rdx1ckv54hdmtyn308zkm3mq98876puwhpqa3hrn8d27swgspaackvnmu7",
+      "resource": "resource_rdx1t575tme0szzjp78ms6m2h6suale84d9ululvwhfkm0jdw2y9n50c2f"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "DefiPlaza Quote",
+      "pair": "xETH/XRD",
+      "component": "pool_rdx1c5glrayedmn0utd44pqs8a3x52dw9aklq2g5f9ewxjxtm7xvjmussa",
+      "resource": "resource_rdx1thhth6tseavhurrgae898k9sht29f3yckzr6szct6zgheqdhxkus0t"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "DefiPlaza Quote",
+      "pair": "xUSDC/XRD",
+      "component": "pool_rdx1ch62axcl22gnmhe5ajtwraukrxstxxqlq5c6p9n2y5qv0pgyqnhfry",
+      "resource": "resource_rdx1t5gr3wsf7jq28fvnpyfg4rwfkewynv67nnqjna9h5f7mwjuwcwegcj"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "DefiPlaza Quote",
+      "pair": "xUSDT/XRD",
+      "component": "pool_rdx1c4scl7k67czs4e29skz0njvcmx4epmrjk4nkrkvsmt93rug7jcnagf",
+      "resource": "resource_rdx1t5swt0y0u6sdzycg02flamm3e6qljjgvpxeg5p5tw6jl7ssel0x369"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "DefiPlaza Quote",
+      "pair": "xwBTC/XRD",
+      "component": "pool_rdx1cht7hqhcnj2la96cygema5l32xwz26luunr9umlszy3s9gr78ppdzv",
+      "resource": "resource_rdx1th6ftl6twglqfz2s8ref2vr5nfccaeq2878p4996uq5duszkjhp2gl"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "Ociswap Basic",
+      "pair": "EARLY/XRD",
+      "component": "pool_rdx1c5hm2rt67scp22pq6tpkfg6cd22g0wwz88065wsy9gdfnd86sv3t4t",
+      "resource": "resource_rdx1t5362v5zqsfkfe38uyl368edpsdm23u5g69qt55jn0ye8nf6umnnv9"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "Ociswap Basic",
+      "pair": "ILIS/XRD",
+      "component": "pool_rdx1ck0daslg9anw64t5ytq0g4svmuj85jwvrrhgz2005exh8gt6qxle4w",
+      "resource": "resource_rdx1t4vvunhvl24nrc8hh99dujuumyllvvsurvu72keaeh74e25358nhah"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "Ociswap Basic",
+      "pair": "OCI/XRD",
+      "component": "pool_rdx1ckyg8aujf09uh8qlz6asst75g5w6pl6vu8nl6qrhskawcndyk6585y",
+      "resource": "resource_rdx1th7ew2u9c9t00xhk34efm9uj8zxnme48h4ypuerv5uu4ftz8j82gdm"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "Ociswap Basic",
+      "pair": "WEFT/XRD",
+      "component": "pool_rdx1ck5w5vnm6qwrmcp4way3wtyjztk7armjea3xc5xaktlk9r4gq6s3ee",
+      "resource": "resource_rdx1th5slwxk8x8xs7438ek6kp7kvrz5lxuu823tql4dqvd92q2fzxr3aq"
+    },
+    {
+      "kind": "NativePool",
+      "dex": "Ociswap Flex",
+      "pair": "ILIS/XRD",
+      "component": "pool_rdx1c5cyh7lhxly2mxzsmrs4c99vhxt9jzap3gaf7s8h0h68fqlpfht0un",
+      "resource": "resource_rdx1t4qxj7nnm0sra6f6j9jq73erd489hdad6jp92hggtfwgwy9p2mgn76"
+    },
+    {
+      "kind": "PrecisionPool",
+      "dex": "Ociswap V1",
+      "pair": "xETH/XRD",
+      "component": "component_rdx1crahf8qdh8fgm8mvzmq5w832h97q5099svufnqn26ue44fyezn7gnm",
+      "resource": "resource_rdx1nge9z3amafwyqvjzg5fzwk9m8dkcu584p6lcme7dx4p72x9xcaa3la"
+    },
+    {
+      "kind": "PrecisionPool",
+      "dex": "Ociswap V1",
+      "pair": "xUSDC/XRD",
+      "component": "component_rdx1cz8daq5nwmtdju4hj5rxud0ta26wf90sdk5r4nj9fqjcde5eht8p0f",
+      "resource": "resource_rdx1nflrqd24a8xqelasygwlt6dhrgtu3akky695kk6j3cy4wu0wfn2ef8"
+    },
+    {
+      "kind": "PrecisionPool",
+      "dex": "Ociswap V1",
+      "pair": "xUSDT/XRD",
+      "component": "component_rdx1cz79xc57dpuhzd3wylnc88m3pyvfk7c5e03me2qv7x8wh9t6c3aw4g",
+      "resource": "resource_rdx1nffckx9ek5x5hn2cxj2hc0tk8yvwh6a2rh9jckgnwha7smry2rtr0a"
+    },
+    {
+      "kind": "PrecisionPool",
+      "dex": "Ociswap V1",
+      "pair": "xwBTC/XRD",
+      "component": "component_rdx1cpgmgrskahkxe4lnpp9s2f5ga0z8jkl7ne8gjmw3fc2224lxq505mr",
+      "resource": "resource_rdx1n2zsvvdahtnlm53ms5f6zazjx6rnnmu2u6xjdr8ggzw45way0tefe6"
+    },
+    {
+      "kind": "PrecisionPool",
+      "dex": "Ociswap V2",
+      "pair": "EARLY/XRD",
+      "component": "component_rdx1cqvn2u9wkgm9k6ksmz2qreau6gr3l0jdn6cwjqunnz2fluex0cgrrl",
+      "resource": "resource_rdx1ng9kjy72tctduldaa0w0xeha8nlua0vj0t0nts9qljmfxx7fv8q399"
+    },
+    {
+      "kind": "PrecisionPool",
+      "dex": "Ociswap V2",
+      "pair": "OCI/XRD",
+      "component": "component_rdx1crm530ath85gcwm4gvwq8m70ay07df085kmupp6gte3ew94vg5pdcp",
+      "resource": "resource_rdx1n2qukjm07d26matv7cyc5ev2f942uy44zn9h3x7p8hnm9dah5flht4"
+    },
+    {
+      "kind": "PrecisionPool",
+      "dex": "Ociswap V2",
+      "pair": "REDDICKS/XRD",
+      "component": "component_rdx1cpwwhuxpe2npedx0axkj4nae8uv5222r0syjtu5fxuaxaj78rf30v9",
+      "resource": "resource_rdx1ngffpg3d3le29c9ajtjw0dxt9utjckujfr0nrg48lp05j30yfpvj6r"
+    },
+    {
+      "kind": "PrecisionPool",
+      "dex": "Ociswap V2",
+      "pair": "WEFT/XRD",
+      "component": "component_rdx1crpq83nf76ea2dkkjxfwr426qvmpu9pyakh58ay3eyswe4ps5yn3q2",
+      "resource": "resource_rdx1n2k0uxng9yfqq7xwt3xnwjz5ue7danx3rz57krxch0626m9lrpkpcx"
+    },
+    {
+      "kind": "PrecisionPool",
+      "dex": "Ociswap V2",
+      "pair": "hBNB/XRD",
+      "component": "component_rdx1cq3zslamrr949gsj7xggr5c02znvurc9uma2rlyrhuj3j70xdjhty5",
+      "resource": "resource_rdx1n2ugznygucx6th6hhjfhlp50kva6wpyp3za704dr63ad3xxwnz2c8h"
+    },
+    {
+      "kind": "PrecisionPool",
+      "dex": "Ociswap V2",
+      "pair": "hETH/XRD",
+      "component": "component_rdx1crumqsy0nu4pl3fwah3nkf8eg8qhltxenk83wh9tzlmr5jnsqs3x4c",
+      "resource": "resource_rdx1ntjl2shav6nez5wdesv2cghms5v5vu3qv3cgeysrwgj2j89agxl4pt"
+    },
+    {
+      "kind": "PrecisionPool",
+      "dex": "Ociswap V2",
+      "pair": "hSOL/XRD",
+      "component": "component_rdx1crltpml9fdn42tv6sjpjyq799ztq2yvzqfsp0ak7jpprt42eldrrwj",
+      "resource": "resource_rdx1ntrddec3kz4njfsx7ty7jw9hhsrtm9td9kzrgv5kc0h2c54m4umkws"
+    },
+    {
+      "kind": "PrecisionPool",
+      "dex": "Ociswap V2",
+      "pair": "hUSDC/XRD",
+      "component": "component_rdx1czy2naejcqx8gv46zdsex2syuxrs4jnqzug58e66zr8wglxzvu97qr",
+      "resource": "resource_rdx1ngd0xja03m9qs03a969c3dqa8xpkxfjddx3qvty0sk6escqfl95cry"
+    },
+    {
+      "kind": "PrecisionPool",
+      "dex": "Ociswap V2",
+      "pair": "hUSDT/XRD",
+      "component": "component_rdx1cprwh9r3wx6vvt0gnv8wscwljegzcevp0hzuju2873eza7fgg493fw",
+      "resource": "resource_rdx1nf2fcykqc67ff0yh4a9m4wvpt0vkwct256lvz4h0h2fa85wzpg8j6z"
+    },
+    {
+      "kind": "PrecisionPool",
+      "dex": "Ociswap V2",
+      "pair": "hwBTC/XRD",
+      "component": "component_rdx1crd7xk0nu07kj60artzz6evws7r6w69lwarf0nqmkxuwwluy5xjud0",
+      "resource": "resource_rdx1ng9scnrsyp2hcezn0lg026xnayvh69wz0qjq2dhxw36v5rknddf8pc"
+    },
+    {
+      "kind": "ShapePool",
+      "dex": "CaviarNine Shape",
+      "pair": "DFP2/XRD",
+      "component": "component_rdx1cqaknlm9rfjxvzwhp7mzsjzustqpuqn6yhsmh8fn3zyr8sm5p3j7ny",
+      "resource": "resource_rdx1nt2vqgq43sr42pgfk625cl6yrzpreq5xqatkf2pgwm9dy7tjuv7e2v"
+    },
+    {
+      "kind": "ShapePool",
+      "dex": "CaviarNine Shape",
+      "pair": "EARLY/XRD",
+      "component": "component_rdx1cpgf3nkgq4ry569rtn3pl6ytymuwh3d23w3vvawxfcnhhzm77e8jys",
+      "resource": "resource_rdx1nfcf90emj9e2ujyuywwa0dsnqxlruar54gz4z7zjxmwtpx67xsrmnc"
+    },
+    {
+      "kind": "ShapePool",
+      "dex": "CaviarNine Shape",
+      "pair": "FLOOP/XRD",
+      "component": "component_rdx1czgaazn4wqf40kav57t8tu6kwv2a5sfmnlzlar9ee6kdqk0ll2chsz",
+      "resource": "resource_rdx1ntpkcfe5ny37wk487ruuxj8wrgk6qg8rjq80m08un4yg98dmyj6msq"
+    },
+    {
+      "kind": "ShapePool",
+      "dex": "CaviarNine Shape",
+      "pair": "LSULP/XRD",
+      "component": "component_rdx1crdhl7gel57erzgpdz3l3vr64scslq4z7vd0xgna6vh5fq5fnn9xas",
+      "resource": "resource_rdx1ntrysy2sncpj6t6shjlgsfr55dns9290e2zsy67fwwrp6mywsrrgsc"
+    },
+    {
+      "kind": "ShapePool",
+      "dex": "CaviarNine Shape",
+      "pair": "LSULP/XRD (v2)",
+      "component": "component_rdx1crjdsyydayu8wuk6zayxlp26fxlsqghvn4cfr0vy5cqqv84qw9fzsx",
+      "resource": "resource_rdx1nfq77djs9udlkhg0ft3qyh2ksjfs0syehq36h5n6ysrr7kvedagzkw"
+    },
+    {
+      "kind": "ShapePool",
+      "dex": "CaviarNine Shape",
+      "pair": "XRD/hUSDC",
+      "component": "component_rdx1cqelumvmmgwths34k9pp0htd2ykwq7d70m0r389etwh39ul3j5tyj5",
+      "resource": "resource_rdx1ngsnjtypwayhkwnyu0swmh2ryu398xtq6gt5lz82n4tyyvs6qyd4wn"
+    },
+    {
+      "kind": "ShapePool",
+      "dex": "CaviarNine Shape",
+      "pair": "XRD/hUSDT",
+      "component": "component_rdx1cph6ayqwqgnavd5yjxjx966nfcnxwt85k9p8fqv37r5pfnn3qcm6az",
+      "resource": "resource_rdx1ng4val4sld9gjwhys6af3wsudk6xdrfr2rhsfswnmz474e2dxacv8x"
+    },
+    {
+      "kind": "ShapePool",
+      "dex": "CaviarNine Shape",
+      "pair": "XRD/xUSDC",
+      "component": "component_rdx1cr6lxkr83gzhmyg4uxg49wkug5s4wwc3c7cgmhxuczxraa09a97wcu",
+      "resource": "resource_rdx1ntzhjg985wgpkhda9f9q05xqdj8xuggfw0j5u3zxudk2csv82d0089"
+    },
+    {
+      "kind": "ShapePool",
+      "dex": "CaviarNine Shape",
+      "pair": "XRD/xUSDT",
+      "component": "component_rdx1cqs338cyje65rk44zgmjvvy42qcszrhk9ewznedtkqd8l3crtgnmh5",
+      "resource": "resource_rdx1nft63kjp38agw0z8nnwkyjhcgpzwjer84945h5z8yr663fgukjyp3l"
+    },
+    {
+      "kind": "ShapePool",
+      "dex": "CaviarNine Shape",
+      "pair": "hBNB/XRD",
+      "component": "component_rdx1crqvzwc3wntan0u0793m2kqwpdsv8g44k5h9fnnm3zcy5v5chugd2u",
+      "resource": "resource_rdx1n25g4ge2hp5qp9ut0usekdng8lm9rv9dyqlq9ng9kqwngutvamcxd5"
+    },
+    {
+      "kind": "ShapePool",
+      "dex": "CaviarNine Shape",
+      "pair": "hETH/XRD",
+      "component": "component_rdx1cqr24rye05h28qnn5crjwlq0djvfcmaegg8sgdkwywfx6s97nk9fcy",
+      "resource": "resource_rdx1n2hw9fr5eaa89gpxapjnjphdzc4u54unfunckz0dceqh9jl2hjgtqq"
+    },
+    {
+      "kind": "ShapePool",
+      "dex": "CaviarNine Shape",
+      "pair": "hSOL/XRD",
+      "component": "component_rdx1cr3agr45z2z8eayp7zc5776ezskwxfr2p4hrrzxzfu20dug83w52cp",
+      "resource": "resource_rdx1n2rgdlr3729sl394qk3a8jrszrrcwtwnq4e6nvtlptx5hmpl797zph"
+    },
+    {
+      "kind": "ShapePool",
+      "dex": "CaviarNine Shape",
+      "pair": "hwBTC/XRD",
+      "component": "component_rdx1crmvyl8nghu4g9ssxjq3yns793mqpn7nkc2cx5rmd2rzkaw0x755cu",
+      "resource": "resource_rdx1ngj84n8y5wnpu6vff40l04k2eecryp8zlcu5ff68j5vrf6q484ac6y"
+    },
+    {
+      "kind": "ShapePool",
+      "dex": "CaviarNine Shape",
+      "pair": "xETH/XRD",
+      "component": "component_rdx1cpsvw207842gafeyvf6tc0gdnq47u3mn74kvzszqlhc03lrns52v82",
+      "resource": "resource_rdx1nthy5lna9l0tgtfxzxcrn6hmle0uymrutqwnlcj8tuujpz3s62wlc5"
+    },
+    {
+      "kind": "ShapePool",
+      "dex": "CaviarNine Shape",
+      "pair": "xwBTC/XRD",
+      "component": "component_rdx1cp9w8443uyz2jtlaxnkcq84q5a5ndqpg05wgckzrnd3lgggpa080ed",
+      "resource": "resource_rdx1nfdteayvxl6425jc5x5xa0p440h6r2mr48mgtj58szujr5cvgnfmn9"
+    }
+  ]
+}

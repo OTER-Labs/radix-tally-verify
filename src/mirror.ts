@@ -3,8 +3,10 @@
  * document carrying `ballot_source` gets on top of the ordinary v20 pipeline.
  *
  * A mirror document publishes TWO tallies of the SAME on-chain ballots — the official Radix DAO
- * Consultation App's own rule (liquid XRD only) and this platform's `WEIGHT_RULE` — so that the
- * only thing the two can disagree about is the weight function. Both use the official vote's own
+ * Consultation App's own rule (direct XRD, every active validator's LSUs, LSULP and its static
+ * DEX allowlist) and this platform's `WEIGHT_RULE` (the same four families under the DAO's
+ * versioned on-ledger register) — so that the only thing the two can disagree about is which
+ * positions each list names. Both use the official vote's own
  * absolute `quorum` and `approval_threshold`. The top-level document fields (`votes`, `totals`,
  * `total_weight`, `quorum`, `approval_threshold_pc`, `approved`, …) already carry the OTER-rule
  * result exactly as an ordinary Poll/Binding document would, so `src/verify.ts`'s existing
@@ -19,10 +21,14 @@
  *       re-read is compared against `doc.votes` account by account, and the entry's own
  *       `quorum` / `approval_threshold` / `start` / `deadline` / `vote_count` / `revote_count`
  *       are compared against what `ballot_source` claims they are.
- *   (b) **the official rule** — liquid XRD only, no LSU/pool/lsulp/concentrated-liquidity
- *       conversion — summed per option over the same ballots, gated by the same absolute
- *       `official_quorum` / `official_approval_threshold` `ballot_source` carries, compared
- *       against `ballot_source.official_rule`.
+ *   (b) **the official rule** — the app's own policy, recomputed with the SAME weight engine the
+ *       OTER rule uses but handed the ALLOWLIST as its register (`src/allowlist.ts`), summed per
+ *       option over the same ballots, gated by the same absolute `official_quorum` /
+ *       `official_approval_threshold` `ballot_source` carries, and compared against
+ *       `ballot_source.official_rule` — its totals, its `totals_by_source` split, and the
+ *       `allowlist_version` / `allowlist_hash` naming the list it claims to have applied. The
+ *       list comes from this package's own `data/` copy, never from the document: a document
+ *       verified against a list it supplied itself would be verified against nothing.
  *   (d) **`ballots_outside_window`** — how many re-read ballots landed outside the window this
  *       document was pinned to. Both bounds are resolved from `official_start` / `official_deadline`
  *       via the SAME Gateway timestamp selector the reference engine's `state_version_at`
@@ -30,9 +36,11 @@
  *       `resolveStateVersionAtTimestamp` and `count_outside_window`'s Rust counterpart in
  *       `backend/src/official_tally.rs`, whose open-window convention (`deadline_state_version =
  *       i64::MAX` while `official_deadline` is still in the future) this mirrors exactly.
- *   (e) **`weight_delta_by_source`** — the per-leg gap between the OTER-rule total and the
- *       official-rule total: what LSUs, native pool units, LSULP, the two concentrated-liquidity
- *       legs, and delegation each added on top of a plain balance read.
+ *   (e) **`weight_delta_by_source`** — the per-source gap between the two rules, OTER-rule
+ *       weight minus official-rule weight over the same participating accounts. Zero on every
+ *       source where the DAO's register and the app's allowlist name the same positions; signed,
+ *       because "our register counts a position theirs does not" and the reverse are different
+ *       facts about the same two lists.
  *
  * Every mismatch here is reported through the same `Difference` shape `src/verify.ts` already
  * uses for the ordinary (c) figures, tagged `ballot_source.(a|b|d|e) …` so the letter that failed
@@ -41,13 +49,14 @@
 
 import type { BallotSource, MirrorKind, TallyDocument } from "./document.ts";
 import { Dec } from "./decimal.ts";
-import { delegatedWeightByDelegate, resolveDelegations } from "./delegation.ts";
+import { officialAllowlistFor } from "./allowlist.ts";
 import { GatewayError, asArray, asObject, asString } from "./gateway.ts";
 import type { GatewayClient } from "./gateway.ts";
 import { stateField } from "./concentrated.ts";
 import { WeightRuleError } from "./concentrated.ts";
 import { bindingApproved } from "./verdict.ts";
-import { computeAccountWeightBreakdown, fetchFungiblesAt } from "./weights.ts";
+import { computeAccountWeightBreakdown } from "./weights.ts";
+import type { WeightBreakdown } from "./weights.ts";
 import type { Difference } from "./verify.ts";
 
 /** Keys per `/state/key-value-store/data` request; pages per `/state/key-value-store/keys` walk. */
@@ -315,17 +324,48 @@ function decStr(v: Dec | undefined): string {
   return v === undefined ? "0" : v.toString();
 }
 
+/** Sum one breakdown map's five listed legs (plus liquid XRD) over the accounts a filter admits. */
+function sumLegs(
+  breakdown: Map<string, WeightBreakdown>,
+  accounts: string[],
+  admit: (account: string) => boolean,
+): { xrd: Dec; lsu: Dec; lsulp: Dec; poolUnits: Dec; precisionPools: Dec; shapePools: Dec } {
+  const sum = {
+    xrd: Dec.ZERO,
+    lsu: Dec.ZERO,
+    lsulp: Dec.ZERO,
+    poolUnits: Dec.ZERO,
+    precisionPools: Dec.ZERO,
+    shapePools: Dec.ZERO,
+  };
+  for (const account of accounts) {
+    if (!admit(account)) continue;
+    const b = breakdown.get(account);
+    if (b === undefined) continue;
+    sum.xrd = sum.xrd.add(b.xrd);
+    sum.lsu = sum.lsu.add(b.lsu);
+    sum.lsulp = sum.lsulp.add(b.lsulp);
+    sum.poolUnits = sum.poolUnits.add(b.poolUnits);
+    sum.precisionPools = sum.precisionPools.add(b.precisionPools);
+    sum.shapePools = sum.shapePools.add(b.shapePools);
+  }
+  return sum;
+}
+
 /**
- * The official rule, recomputed: liquid XRD only (no LSU, no pool, no lsulp, no
- * concentrated-liquidity), summed per Poll option, gated by `ballot_source`'s own absolute
- * `official_quorum` / `official_approval_threshold`. Assumes a binary Approve/Reject bar — every
- * mirror document this tool has seen publishes one, matching the official component's own
- * Temperature-Check and binary-Proposal shape (`plan-w1-mirror-tallies.md` §6) — and refuses
- * (MALFORMED) rather than guess at a multi-select official bar the plan does not specify.
+ * The official rule, recomputed: the app's own weight function — direct XRD, every active
+ * validator's LSUs, LSULP and the allowlisted positions, which is what `weights` already holds
+ * because the caller computed it under the ALLOWLIST as its register — summed per Poll option and
+ * gated by `ballot_source`'s own absolute `official_quorum` / `official_approval_threshold`.
+ *
+ * Assumes a binary Approve/Reject bar — every mirror document this tool has seen publishes one,
+ * matching the official component's own Temperature-Check and binary-Proposal shape
+ * (`plan-w1-mirror-tallies.md` §6) — and refuses (MALFORMED) rather than guess at a multi-select
+ * official bar the plan does not specify.
  */
 function officialRuleFigures(
   ballots: Map<string, number[]>,
-  liquidXrd: Map<string, Dec>,
+  weights: Map<string, Dec>,
   barred: Set<string>,
   optionCount: number,
   quorum: Dec,
@@ -341,7 +381,7 @@ function officialRuleFigures(
   let totalWeight = Dec.ZERO;
   for (const [account, selection] of ballots) {
     if (barred.has(account)) continue;
-    const weight = liquidXrd.get(account) ?? Dec.ZERO;
+    const weight = weights.get(account) ?? Dec.ZERO;
     totalWeight = totalWeight.add(weight);
     for (const idx of selection) {
       if (idx === 0 || idx === 1) totals[idx] = (totals[idx] as Dec).add(weight);
@@ -471,16 +511,34 @@ export async function verifyMirrorBallots(
     );
   }
 
-  // (b) the official rule: liquid XRD only, over the document's own ballots (which (a) has just
-  // checked equal the on-chain ones) and its own excluded_accounts bar.
+  // (b) the official rule: the app's own policy, over the document's own ballots (which (a) has
+  // just checked equal the on-chain ones) and its own excluded_accounts bar.
+  //
+  // The list comes from THIS package's data/, chosen by the component's network — never from the
+  // document, which would make the claim unfalsifiable. The version and hash are checked first,
+  // because a mismatch there is the explanation for every total that follows: a document weighed
+  // under a list this verifier does not carry is not wrong, it is unverifiable here, and saying
+  // so by name is more use than a wall of totals differences.
+  const allowlist = officialAllowlistFor(bs.component);
+  check("ballot_source.(b) official_rule.allowlist_version", bs.officialRule.allowlistVersion, allowlist.version);
+  check("ballot_source.(b) official_rule.allowlist_hash", bs.officialRule.allowlistHash, allowlist.hash);
+
   const barred = new Set(doc.excludedAccounts);
   const accounts = [...new Set(doc.votes.map((v) => v.account))];
-  const fungibles = await fetchFungiblesAt(gw, accounts, doc.snapshotStateVersion);
-  const liquidXrd = new Map(accounts.map((a) => [a, fungibles.get(a)?.get(xrdResource) ?? Dec.ZERO]));
+  const officialBreakdown = await computeAccountWeightBreakdown(
+    gw,
+    accounts,
+    doc.snapshotStateVersion,
+    allowlist.sources,
+    xrdResource,
+  );
+  const officialWeights = new Map(
+    accounts.map((a) => [a, officialBreakdown.get(a)?.total ?? Dec.ZERO]),
+  );
   const publishedBallots = new Map(doc.votes.map((v) => [v.account, v.selection]));
   const official = officialRuleFigures(
     publishedBallots,
-    liquidXrd,
+    officialWeights,
     barred,
     doc.totals.length,
     bs.officialQuorum,
@@ -497,6 +555,21 @@ export async function verifyMirrorBallots(
   check("ballot_source.(b) official_rule.quorum_met", String(bs.officialRule.quorumMet), String(official.quorumMet));
   check("ballot_source.(b) official_rule.approved", String(bs.officialRule.approved), String(official.approved));
 
+  // The official leg's own split. Summed over every account that cast a ballot — the official
+  // rule has no bar of its own (their vote has none) and no delegation, so its by-source total is
+  // over voters, exactly as the engine's `totals_by_source` is.
+  const officialSum = sumLegs(officialBreakdown, accounts, () => true);
+  check("ballot_source.(b) official_rule.totals_by_source.liquid", bs.officialRule.totalsBySource.liquid.toString(), officialSum.xrd.toString());
+  check("ballot_source.(b) official_rule.totals_by_source.lsu", bs.officialRule.totalsBySource.lsu.toString(), officialSum.lsu.toString());
+  check("ballot_source.(b) official_rule.totals_by_source.lsulp", bs.officialRule.totalsBySource.lsulp.toString(), officialSum.lsulp.toString());
+  check("ballot_source.(b) official_rule.totals_by_source.pool_units", bs.officialRule.totalsBySource.poolUnits.toString(), officialSum.poolUnits.toString());
+  check(
+    "ballot_source.(b) official_rule.totals_by_source.precision_pools",
+    bs.officialRule.totalsBySource.precisionPools.toString(),
+    officialSum.precisionPools.toString(),
+  );
+  check("ballot_source.(b) official_rule.totals_by_source.shape_pools", bs.officialRule.totalsBySource.shapePools.toString(), officialSum.shapePools.toString());
+
   // (d) ballots outside the window: both bounds resolved from the official timestamps via the
   // SAME Gateway timestamp selector the engine's `state_version_at` uses — see
   // `resolveStateVersionAtTimestamp` and `ballotsOutsideWindow` above. `vote_start_state_version`
@@ -511,54 +584,36 @@ export async function verifyMirrorBallots(
   const outsideWindow = ballotsOutsideWindow(ballots, lowerBoundSv, upperBoundSv);
   check("ballot_source.(d) ballots_outside_window", String(bs.ballotsOutsideWindow), String(outsideWindow));
 
-  // (e) weight_delta_by_source: the per-leg gap between the OTER-rule total and the official-rule
-  // total, over the same participating (non-barred, voting) accounts, plus delegation's net.
-  const delegationAccounts = [
-    ...new Set([...accounts, ...(doc.delegationInput ?? []).map((d) => d.delegator)]),
-  ];
+  // (e) weight_delta_by_source: OTER-rule weight minus official-rule weight, per source, over the
+  // participating (non-barred, voting) accounts. Both sides come from the same breakdown struct
+  // over the same account set, so an account neither rule weighed contributes nothing rather than
+  // appearing as a difference, and a barred ballot is absent from both.
   const breakdown = await computeAccountWeightBreakdown(
     gw,
-    delegationAccounts,
+    accounts,
     doc.snapshotStateVersion,
     doc.weightSources,
     xrdResource,
   );
-  let lsu = Dec.ZERO;
-  let poolUnits = Dec.ZERO;
-  let lsulp = Dec.ZERO;
-  let precisionPools = Dec.ZERO;
-  let shapePools = Dec.ZERO;
-  for (const account of accounts) {
-    if (barred.has(account)) continue;
-    const b = breakdown.get(account);
-    if (b === undefined) continue;
-    lsu = lsu.add(b.lsu);
-    poolUnits = poolUnits.add(b.poolUnits);
-    lsulp = lsulp.add(b.lsulp);
-    precisionPools = precisionPools.add(b.precisionPools);
-    shapePools = shapePools.add(b.shapePools);
-  }
-  let delegationNet = Dec.ZERO;
-  if (doc.delegationInput !== null) {
-    const voted = new Set(doc.votes.map((v) => v.account));
-    const resolved = resolveDelegations(doc.delegationInput, voted, barred);
-    const weights = new Map(delegationAccounts.map((a) => [a, breakdown.get(a)?.total ?? Dec.ZERO]));
-    delegationNet = delegatedWeightByDelegate(resolved, weights).total;
-  }
-  check("ballot_source.(e) weight_delta_by_source.lsu", bs.weightDeltaBySource.lsu.toString(), lsu.toString());
-  check("ballot_source.(e) weight_delta_by_source.pool_units", bs.weightDeltaBySource.poolUnits.toString(), poolUnits.toString());
-  check("ballot_source.(e) weight_delta_by_source.lsulp", bs.weightDeltaBySource.lsulp.toString(), lsulp.toString());
+  const counted = (account: string): boolean => !barred.has(account);
+  const oterSum = sumLegs(breakdown, accounts, counted);
+  const officialCountedSum = sumLegs(officialBreakdown, accounts, counted);
+  const delta = {
+    lsu: oterSum.lsu.sub_(officialCountedSum.lsu),
+    poolUnits: oterSum.poolUnits.sub_(officialCountedSum.poolUnits),
+    lsulp: oterSum.lsulp.sub_(officialCountedSum.lsulp),
+    precisionPools: oterSum.precisionPools.sub_(officialCountedSum.precisionPools),
+    shapePools: oterSum.shapePools.sub_(officialCountedSum.shapePools),
+  };
+  check("ballot_source.(e) weight_delta_by_source.lsu", bs.weightDeltaBySource.lsu.toString(), delta.lsu.toString());
+  check("ballot_source.(e) weight_delta_by_source.pool_units", bs.weightDeltaBySource.poolUnits.toString(), delta.poolUnits.toString());
+  check("ballot_source.(e) weight_delta_by_source.lsulp", bs.weightDeltaBySource.lsulp.toString(), delta.lsulp.toString());
   check(
     "ballot_source.(e) weight_delta_by_source.precision_pools",
     bs.weightDeltaBySource.precisionPools.toString(),
-    precisionPools.toString(),
+    delta.precisionPools.toString(),
   );
-  check("ballot_source.(e) weight_delta_by_source.shape_pools", bs.weightDeltaBySource.shapePools.toString(), shapePools.toString());
-  check(
-    "ballot_source.(e) weight_delta_by_source.delegation_net",
-    bs.weightDeltaBySource.delegationNet.toString(),
-    delegationNet.toString(),
-  );
+  check("ballot_source.(e) weight_delta_by_source.shape_pools", bs.weightDeltaBySource.shapePools.toString(), delta.shapePools.toString());
 
   return diffs;
 }

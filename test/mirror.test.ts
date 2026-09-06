@@ -21,7 +21,20 @@ import { FakeGateway, SNAPSHOT_SV, XRD } from "./fake-gateway.ts";
 
 const hash = (doc: Record<string, unknown>): string => tallyHash(doc as unknown as Json);
 
-const COMPONENT = "component_rdx1cp0governance00000000000000000000000000000000000007";
+// A STOKENET governance component: `officialAllowlistFor` picks the shipped list by the
+// address's own bech32 prefix, and the stokenet list names no DEX position (none of the three
+// DEXes deploys there), so the official rule here is direct XRD plus every active validator's
+// LSUs — Tier 1, and exactly what a test stack can produce. The mainnet list's own content and
+// hash are checked directly in `allowlist.test.ts` rather than driven through a fake Gateway
+// that would have to serve sixty-nine pools.
+const COMPONENT = "component_tdx_2_1cp0governance000000000000000000000000000000000007";
+/** blake2b-256 of the canonical `[]` — the stokenet list's `allowlist_hash`. */
+const STOKENET_ALLOWLIST_HASH = "c2c013c86a9c92e22f966f3d8617768f8b7a44c902adcc097bfa1e098afb4e1f";
+const OFFICIAL_RULE_TEXT =
+  "The Radix DAO Consultation App's own rule at snapshot_state_version: direct XRD at par, plus " +
+  "the stake units of every active validator at their underlying XRD value, plus LSULP at its " +
+  "underlying liquid-staked XRD value, plus the XRD, LSU and LSULP side of each position on the " +
+  "app's static DEX allowlist.";
 const TC_REGISTER_KVS = "internal_keyvaluestore_rdx1kvtc0000000000000000000000000000000008";
 const VOTERS_KVS = "internal_keyvaluestore_rdx1kvvoters00000000000000000000000000009";
 const LSU = "resource_rdx1lsu000000000000000000000000000000000000000000000001";
@@ -35,11 +48,15 @@ const OFFICIAL_START = 1754000000;
 const OFFICIAL_DEADLINE = 1754604800;
 const BALLOT_SV = SNAPSHOT_SV + 50;
 
-/** A mirror tally document over the fixture Temperature Check: liquid-only For, staked For
- * (weight includes the LSU leg the official rule never sees), Against revoter. Official rule
- * (liquid XRD only): Against 30, For 120, total 150. OTER rule: Against 30, For 145 (120 + the
- * staked voter's 25 XRD of LSU), total 175. Both use the official absolute quorum 100 /
- * threshold 50. */
+/** A mirror tally document over the fixture Temperature Check: liquid-only For, staked For,
+ * Against revoter.
+ *
+ * The two rules AGREE here, and that is the case worth pinning: validator LSUs are Tier 1 in
+ * both, the stokenet allowlist names no pool, and nobody holds one — so both legs read Against
+ * 30, For 145 (120 liquid + the staked voter's 25 XRD of LSU), total 175, and every
+ * `weight_delta_by_source` leg is zero. A staked voter weighing the same under both rules is the
+ * whole point of #172: before it, this fixture's official leg dropped the 25. Both use the
+ * official absolute quorum 100 / threshold 50. */
 function mirrorDoc(over: Record<string, unknown> = {}, ballotSourceOver: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     tally_doc_version: 20,
@@ -73,7 +90,7 @@ function mirrorDoc(over: Record<string, unknown> = {}, ballotSourceOver: Record<
     reject_weight: "30",
     approved: true,
     ballot_source: {
-      mirror_doc_version: 1,
+      mirror_doc_version: 2,
       component: COMPONENT,
       blueprint: "Governance",
       kind: "temperature_check",
@@ -88,19 +105,28 @@ function mirrorDoc(over: Record<string, unknown> = {}, ballotSourceOver: Record<
       ballot_state_version: BALLOT_SV,
       ballots_outside_window: 0,
       official_rule: {
-        rule: "liquid XRD balance at snapshot_state_version",
-        totals: ["30", "120"],
-        total_weight: "150",
+        rule: OFFICIAL_RULE_TEXT,
+        allowlist_version: "2026-09-06",
+        allowlist_hash: STOKENET_ALLOWLIST_HASH,
+        totals: ["30", "145"],
+        totals_by_source: {
+          liquid: "150",
+          lsu: "25",
+          lsulp: "0",
+          pool_units: "0",
+          precision_pools: "0",
+          shape_pools: "0",
+        },
+        total_weight: "175",
         quorum_met: true,
         approved: true,
       },
       weight_delta_by_source: {
-        lsu: "25",
+        lsu: "0",
         pool_units: "0",
         lsulp: "0",
         precision_pools: "0",
         shape_pools: "0",
-        delegation_net: "0",
       },
       ...ballotSourceOver,
     },
@@ -234,7 +260,8 @@ function timestampDetails(stateVersion: number): unknown {
 }
 
 /** The whole scenario, wired in the exact call order `src/mirror.ts` and the ordinary pipeline
- * make them: component -> register -> voters (check a), liquid balances (check b), the window
+ * make them: component -> register -> voters (check a), the official-rule weight walk under the
+ * shipped allowlist (check b — a full breakdown now, not a balance read), the window
  * bounds (check d: `official_start` resolves to `startSv`, `official_deadline` to `deadlineSv` —
  * `null` means the window is still open, so no deadline call happens at all), the
  * weight-breakdown read (check e), then the ordinary OTER-rule pipeline re-reads the same
@@ -249,11 +276,13 @@ function mirrorGateway(overrides: {
 } = {}): FakeGateway {
   const gw = new FakeGateway()
     .onDetails(overrides.componentDetails ?? componentDetails())
-    .onDetails(accountsFungibles()) // (b) official rule: liquid-only
-    .onDetails(accountsFungibles()) // (e) weight-breakdown fungibles
+    .onDetails(accountsFungibles()) // (b) official-rule breakdown, under the ALLOWLIST register
+    .onDetails(resourceInfo()) // (b) its held-resource info
+    .onDetails(accountsFungibles()) // (e) OTER-rule breakdown fungibles
     .onDetails(resourceInfo()) // (e) weight-breakdown held-resource info
     .onDetails(accountsFungibles()) // (c) the ordinary OTER-rule pipeline
     .onDetails(resourceInfo()) // (c) the ordinary OTER-rule pipeline
+    .onValidators(validatorsResponse())
     .onValidators(validatorsResponse())
     .onValidators(validatorsResponse())
     .onTimestampDetails(timestampDetails(overrides.startSv ?? SNAPSHOT_SV)); // (d) official_start
@@ -354,13 +383,27 @@ test("(a) a ballot the chain does not agree with is a figures disagreement namin
   assert.ok(d, `expected an (a) ballots[...] difference, got: ${JSON.stringify(outcome.differences)}`);
 });
 
+/** The pre-#172 number: an official leg that read liquid XRD only put 120 on the For side and
+ * dropped the staked voter's 25. It is now a DIFFERENCE, which is the regression this check
+ * exists to catch — a mirror still claiming the old rule's figure is claiming a rule the
+ * Consultation App does not apply. */
 test("(b) a wrong official-rule total is a figures disagreement naming (b)", async () => {
   const doc = mirrorDoc(
     {},
     {
       official_rule: {
-        rule: "liquid XRD balance at snapshot_state_version",
-        totals: ["30", "121"],
+        rule: OFFICIAL_RULE_TEXT,
+        allowlist_version: "2026-09-06",
+        allowlist_hash: STOKENET_ALLOWLIST_HASH,
+        totals: ["30", "120"],
+        totals_by_source: {
+          liquid: "150",
+          lsu: "25",
+          lsulp: "0",
+          pool_units: "0",
+          precision_pools: "0",
+          shape_pools: "0",
+        },
         total_weight: "150",
         quorum_met: true,
         approved: true,
@@ -372,8 +415,62 @@ test("(b) a wrong official-rule total is a figures disagreement naming (b)", asy
   if (outcome.kind !== "figures") return;
   const d = outcome.differences.find((x) => x.field === "ballot_source.(b) official_rule.totals[1]");
   assert.ok(d, `expected an (b) official_rule.totals[1] difference, got: ${JSON.stringify(outcome.differences)}`);
-  assert.equal(d?.document, "121");
-  assert.equal(d?.recomputed, "120");
+  assert.equal(d?.document, "120");
+  assert.equal(d?.recomputed, "145");
+});
+
+/** The allowlist itself is checked before any total: a document weighed under a list this
+ * verifier does not carry is unverifiable here, and the hash is what says so by name. The list
+ * comes from `data/`, never from the document — otherwise the field would be a claim checked
+ * against itself. */
+test("(b) an allowlist hash the verifier does not carry is a figures disagreement naming (b)", async () => {
+  const doc = mirrorDoc(
+    {},
+    {
+      official_rule: {
+        rule: OFFICIAL_RULE_TEXT,
+        allowlist_version: "2099-01-01",
+        allowlist_hash: "00".repeat(32),
+        totals: ["30", "145"],
+        totals_by_source: {
+          liquid: "150",
+          lsu: "25",
+          lsulp: "0",
+          pool_units: "0",
+          precision_pools: "0",
+          shape_pools: "0",
+        },
+        total_weight: "175",
+        quorum_met: true,
+        approved: true,
+      },
+    },
+  );
+  const outcome = await verifyTallyDocument(doc, null, mirrorGateway(), XRD);
+  assert.equal(outcome.kind, "figures");
+  if (outcome.kind !== "figures") return;
+  const version = outcome.differences.find(
+    (x) => x.field === "ballot_source.(b) official_rule.allowlist_version",
+  );
+  const digest = outcome.differences.find(
+    (x) => x.field === "ballot_source.(b) official_rule.allowlist_hash",
+  );
+  assert.ok(version, `expected an allowlist_version difference: ${JSON.stringify(outcome.differences)}`);
+  assert.equal(version?.recomputed, "2026-09-06");
+  assert.ok(digest, `expected an allowlist_hash difference: ${JSON.stringify(outcome.differences)}`);
+  assert.equal(digest?.recomputed, STOKENET_ALLOWLIST_HASH);
+});
+
+/** A version-1 block states the official rule as liquid XRD only. It is refused at PARSE time
+ * rather than recomputed under version 2's rule, which would compare a number against a rule
+ * that did not produce it. */
+test("a mirror_doc_version 1 block is refused rather than checked under the new rule", async () => {
+  const { parseTallyDocument, DocumentError } = await import("../src/document.ts");
+  const doc = mirrorDoc({}, { mirror_doc_version: 1 });
+  assert.throws(
+    () => parseTallyDocument(doc),
+    (e: unknown) => e instanceof DocumentError && /mirror_doc_version/.test((e as Error).message),
+  );
 });
 
 test("(c) a wrong published OTER-rule weight is a figures disagreement, the ordinary (c) path unchanged", async () => {
@@ -430,17 +527,16 @@ test("(d) a still-open window (deadline in the future) counts no ballot late", a
   assert.deepEqual(outcome, { kind: "match", hashChecked: true });
 });
 
-test("(e) a wrong weight_delta_by_source leg is a figures disagreement naming (e)", async () => {
+test("(e) a stale weight_delta_by_source leg is a figures disagreement naming (e)", async () => {
   const doc = mirrorDoc(
     {},
     {
       weight_delta_by_source: {
-        lsu: "24",
+        lsu: "25",
         pool_units: "0",
         lsulp: "0",
         precision_pools: "0",
         shape_pools: "0",
-        delegation_net: "0",
       },
     },
   );
@@ -449,6 +545,8 @@ test("(e) a wrong weight_delta_by_source leg is a figures disagreement naming (e
   if (outcome.kind !== "figures") return;
   const d = outcome.differences.find((x) => x.field === "ballot_source.(e) weight_delta_by_source.lsu");
   assert.ok(d, `expected a (e) weight_delta_by_source.lsu difference, got: ${JSON.stringify(outcome.differences)}`);
-  assert.equal(d?.document, "24");
-  assert.equal(d?.recomputed, "25");
+  // The pre-#172 claim: "the LSU leg is what the official rule drops". Both rules count it now,
+  // so the honest delta is zero and a document still claiming 25 is claiming a rule nobody applies.
+  assert.equal(d?.document, "25");
+  assert.equal(d?.recomputed, "0");
 });
