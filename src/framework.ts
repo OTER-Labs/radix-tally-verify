@@ -62,16 +62,33 @@ export interface Sides {
 }
 
 /**
+ * Strip ASCII whitespace from both ends of a label: U+0020 space, U+0009 tab, U+000A line feed,
+ * U+000C form feed and U+000D carriage return, and nothing else. JavaScript's `trim()` and Rust's
+ * `str::trim` strip different Unicode sets (one strips U+FEFF and keeps U+0085, the other the
+ * reverse), so "trimmed" is pinned to this set to leave nothing for two implementations to
+ * disagree about.
+ */
+export function trimAsciiWhitespace(s: string): string {
+  return s.replace(/^[\u0020\u0009\u000A\u000C\u000D]+|[\u0020\u0009\u000A\u000C\u000D]+$/g, "");
+}
+
+/** Lower-case A-Z only, as the reference engine's ASCII lowering does. */
+function asciiLower(s: string): string {
+  return s.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
+}
+
+/**
  * A Temperature Check's sides are For (1) and Against (0) in the mirror's `["Against", "For"]`.
- * A proposal has sides only when it is single choice and its labels — trimmed, ASCII
- * case-insensitive — are exactly `approve`, `reject` and optionally `abstain`, each once.
+ * A proposal has sides only when it is single choice and its labels — with ASCII whitespace
+ * trimmed (`trimAsciiWhitespace`), ASCII case-insensitive — are exactly `approve`, `reject` and
+ * optionally `abstain`, each once.
  */
 export function decisionSides(kind: MirrorKind, options: string[], maxSelections: number | null): Sides | null {
   if (kind === "temperature_check") return { approve: 1, reject: 0, abstain: null };
   if (maxSelections !== null) return null;
   const found: Record<string, number> = {};
   for (let i = 0; i < options.length; i++) {
-    const label = (options[i] ?? "").trim().toLowerCase();
+    const label = asciiLower(trimAsciiWhitespace(options[i] ?? ""));
     if (label !== "approve" && label !== "reject" && label !== "abstain") return null;
     if (label in found) return null;
     found[label] = i;

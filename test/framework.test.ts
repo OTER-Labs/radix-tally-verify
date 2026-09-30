@@ -48,3 +48,21 @@ test("sides come from the labels, never the positions", () => {
   }
   assert.equal(decisionSides("proposal", ["Approve", "Reject", "Abstain"], 2), null, "multi-select");
 });
+
+/**
+ * "Trimmed" means ASCII whitespace only — U+0020, U+0009, U+000A, U+000C, U+000D — so the
+ * verifier and any other implementation agree on every label. A label wrapped in anything else
+ * is not Approve/Reject/Abstain and the proposal decides nothing. U+FEFF is the case JavaScript's
+ * `trim()` would strip; U+0085 the case Rust's `str::trim` would; U+000B is outside the set too.
+ */
+test("labels are trimmed of ASCII whitespace only", () => {
+  assert.deepEqual(
+    decisionSides("proposal", [" \t\nApprove\r\f ", "  Reject\n", "\tAbstain "], null),
+    { approve: 0, reject: 1, abstain: 2 },
+  );
+  for (const other of ["﻿", "\u0085", "\u000B", " ", " "]) {
+    const code = other.codePointAt(0)?.toString(16);
+    assert.equal(decisionSides("proposal", [`${other}Approve`, "Reject"], null), null, `leading U+${code}`);
+    assert.equal(decisionSides("proposal", ["Approve", `Reject${other}`], null), null, `trailing U+${code}`);
+  }
+});
