@@ -3,11 +3,16 @@
  * the ordinary pipeline.
  *
  * A mirror document publishes TWO tallies of the SAME on-chain ballots — the official Radix DAO
- * Consultation App's own rule (direct XRD, every active validator's LSUs, LSULP and its static
- * DEX allowlist) and this platform's `WEIGHT_RULE` (the same four families under the DAO's
- * versioned on-ledger register) — so that the only thing the two can disagree about is which
- * positions each list names. Both use the official vote's own
- * absolute `quorum` and `approval_threshold`. The top-level document fields (`votes`, `totals`,
+ * Consultation App's own rule (direct XRD, every validator's LSUs, LSULP and its static DEX
+ * allowlist) and this platform's `WEIGHT_RULE` (the same four families under the DAO's versioned
+ * on-ledger register) — so that the only thing the two can disagree about is which positions
+ * each list names. Both take ONE bar, the official vote's own: the absolute `quorum` and
+ * `approval_threshold` of its parameter-set leg, plus the governance framework's Minimum
+ * Affirmative Support and distinct-voter floor for that set (`src/framework.ts`). Both decide by
+ * LABEL: a Temperature Check's sides are For and Against, a Proposal's are its Approve, Reject and
+ * optional Abstain options wherever they sit, and a Proposal with any other label set, or a
+ * multi-select one, decides nothing. Abstain counts toward quorum and stays outside the decisive
+ * share. The top-level document fields (`votes`, `totals`,
  * `total_weight`, `quorum`, `approval_threshold_pc`, `approved`, …) already carry the OTER-rule
  * result exactly as an ordinary Poll/Binding document would, so `src/verify.ts`'s existing
  * pipeline checks that half — recompute the weights, re-derive the verdict, compare — completely
@@ -19,8 +24,11 @@
  *       — by walking the official component's own state: `temperature_checks` / `proposals` KVS
  *       → the entry named by `official_id` → its `voters` KVS, at `ballot_state_version`. This
  *       re-read is compared against `doc.votes` account by account, and the entry's own
- *       `quorum` / `approval_threshold` / `start` / `deadline` / `vote_count` / `revote_count`
- *       are compared against what `ballot_source` claims they are.
+ *       metadata against what `ballot_source` claims: the `quorum` / `approval_threshold` of its
+ *       parameter-set leg, the set's `{id, label, version, variant}`, `start` / `deadline` /
+ *       `vote_count` / `revote_count`, a Temperature Check's `snapshot`, recorded `outcome` and
+ *       `continuation`, and a Proposal's `max_selections`. The entry is read in the Governance
+ *       1.0.0 shape, by field name; a shape it does not describe is refused, naming the path.
  *   (b) **the official rule** — the app's own policy, recomputed with the SAME weight engine the
  *       OTER rule uses but handed the ALLOWLIST as its register (`src/allowlist.ts`), summed per
  *       option over the same ballots, gated by the same absolute `official_quorum` /
@@ -30,7 +38,7 @@
  *       list comes from this package's own `data/` copy, never from the document: a document
  *       verified against a list it supplied itself would be verified against nothing.
  *   (d) **`ballots_outside_window`** — how many re-read ballots landed outside the window this
- *       document was pinned to. Both bounds are resolved from `official_start` / `official_deadline`
+ *       document was pinned to. Both bounds are resolved from `official_snapshot` / `official_deadline`
  *       via the SAME Gateway timestamp selector the reference engine's own state-version lookup
  *       uses, ported here rather than approximated — see `resolveStateVersionAtTimestamp` and
  *       `ballotsOutsideWindow` below, whose open-window convention (an unbounded upper bound
@@ -40,15 +48,26 @@
  *       source where the DAO's register and the app's allowlist name the same positions; signed,
  *       because "our register counts a position theirs does not" and the reverse are different
  *       facts about the same two lists.
+ *   (f) **the framework bar** — eligible voting power, MAS and the distinct-voter floor,
+ *       re-derived from the RE-READ parameter-set id and quorum (never the document's): eligible
+ *       is `quorum * 100 / quorum_pc`, a lower bound within `100 / quorum_pc` of the true figure,
+ *       and MAS is `eligible * mas_pc / 100`. Compared against the top-level
+ *       `eligible_voting_power`, `min_affirmative_support` and `min_unique_voters`, and against
+ *       the `ballot_source.framework` row the document names. A set the framework table does not
+ *       name has no bar: `eligible_voting_power` `"0"`, `framework` null, and no verdict.
  *
  * Every mismatch here is reported through the same `Difference` shape `src/verify.ts` already
- * uses for the ordinary (c) figures, tagged `ballot_source.(a|b|d|e) …` so the letter that failed
+ * uses for the ordinary (c) figures, tagged `ballot_source.(a|b|d|e|f) …` so the letter that failed
  * is legible in the output without a second Outcome kind.
  */
 
 import type { BallotSource, MirrorKind, TallyDocument } from "./document.ts";
+import { canonicalize } from "./canonical.ts";
+import type { Json } from "./canonical.ts";
 import { Dec } from "./decimal.ts";
 import { officialAllowlistFor } from "./allowlist.ts";
+import { ELIGIBLE_DERIVATION, FRAMEWORK_SOURCE, decisionSides, frameworkFor } from "./framework.ts";
+import type { Sides } from "./framework.ts";
 import { GatewayError, asArray, asObject, asString } from "./gateway.ts";
 import type { GatewayClient } from "./gateway.ts";
 import { stateField } from "./concentrated.ts";
@@ -141,12 +160,54 @@ async function pageKvsKeys(
 export interface OfficialEntry {
   blueprint: string;
   votersKvsAddress: string;
+  /** The vote's own snapshot of its parameter set: `id`, `label`, `version`, and the
+   * `parameters` variant (`Standard` or `MajorityJudgment`). */
+  parameterSet: { id: string; label: string; version: number; variant: string };
+  /** `quorum` and `approval_threshold` of the vote's own leg of that set — `temperature_check`
+   * for a Temperature Check, `proposal` for a Proposal. */
   quorum: Dec;
   approvalThreshold: Dec;
+  /** A Temperature Check's own `snapshot` Instant; `null` on a Proposal, which carries none. */
+  snapshot: number | null;
   start: number;
   deadline: number;
   voteCount: number;
   revoteCount: number;
+  /** A Temperature Check's recorded outcome (`Passed` / `Failed` and when); `null` until one is
+   * recorded, and on every Proposal. */
+  outcome: { result: string; recordedAt: number } | null;
+  /** What a Temperature Check was elevated to; `null` when it has not been, and on a Proposal. */
+  continuation: { kind: string; id: number } | null;
+  /** A Proposal's `max_selections`; `null` when single choice, and on every Temperature Check. */
+  maxSelections: number | null;
+}
+
+/** An Enum-shaped `programmatic_json` field: its `variant_name` and the node itself. */
+function enumNode(node: unknown, name: string): { variant: string; fields: unknown } | null {
+  const f = tupleField(node, name);
+  if (f === null) return null;
+  const variant = asString(f["variant_name"]);
+  return variant === null ? null : { variant, fields: f };
+}
+
+/** An `Option<T>` field: `null` for `None`, the inner value node for `Some`, refused otherwise. */
+function optionInner(node: unknown, name: string, field: string): Record<string, unknown> | null {
+  const e = enumNode(node, name);
+  if (e === null) throw new WeightRuleError(`${field} has no readable ${name} field`);
+  if (e.variant === "None") return null;
+  if (e.variant !== "Some") throw new WeightRuleError(`${field}.${name} is not an Option`);
+  const inner = asArray(asObject(e.fields)["fields"])[0];
+  if (inner === undefined) throw new WeightRuleError(`${field}.${name} is Some with no value`);
+  return asObject(inner);
+}
+
+/** An unsigned integer carried as a `programmatic_json` scalar node's string `value`. */
+function scalarInt(node: unknown, what: string): number {
+  const s = asString(asObject(node)["value"]);
+  if (s === null || !/^\d+$/.test(s) || !Number.isSafeInteger(Number(s))) {
+    throw new WeightRuleError(`${what} is not a readable unsigned integer`);
+  }
+  return Number(s);
 }
 
 /** One ballot, re-read from the `voters` key-value store at `ballot_state_version`. */
@@ -228,15 +289,83 @@ export async function readOfficialEntry(
     throw new WeightRuleError(`${field} has no readable voters field`);
   }
 
-  return {
+  // The Governance 1.0.0 shape: quorum and threshold live on the vote's own snapshot of its
+  // parameter set, under the leg for its kind. A Temperature Check reads the temperature_check
+  // leg of either variant; a Proposal exists only under a Standard set and reads its proposal leg.
+  const set = tupleField(value, "parameter_set");
+  if (set === null) throw new WeightRuleError(`${field} has no readable parameter_set field`);
+  const params = enumNode(set, "parameters");
+  if (params === null || (params.variant !== "Standard" && params.variant !== "MajorityJudgment")) {
+    throw new WeightRuleError(`${field} has no readable parameter_set.parameters variant`);
+  }
+  const legName = kind === "temperature_check" ? "temperature_check" : "proposal";
+  if (legName === "proposal" && params.variant !== "Standard") {
+    throw new WeightRuleError(`${field}: parameter_set.parameters: variant ${params.variant} has no proposal leg`);
+  }
+  const leg = tupleField(params.fields, legName);
+  if (leg === null) throw new WeightRuleError(`${field} has no parameter_set.parameters.${params.variant}.${legName}`);
+  const legField = `${field} parameter_set.parameters.${params.variant}.${legName}`;
+  const setId = tupleFieldString(set, "id");
+  if (setId === null) throw new WeightRuleError(`${field} has no readable parameter_set.id field`);
+  const setLabel = tupleFieldString(set, "label");
+  if (setLabel === null) throw new WeightRuleError(`${field} has no readable parameter_set.label field`);
+  const parameterSet = {
+    id: setId,
+    label: setLabel,
+    version: tupleFieldInt(set, "version", `${field} parameter_set`),
+    variant: params.variant,
+  };
+
+  const common = {
     blueprint,
     votersKvsAddress,
-    quorum: tupleFieldDec(value, "quorum", field),
-    approvalThreshold: tupleFieldDec(value, "approval_threshold", field),
+    parameterSet,
+    quorum: tupleFieldDec(leg, "quorum", legField),
+    approvalThreshold: tupleFieldDec(leg, "approval_threshold", legField),
     start: tupleFieldInt(value, "start", field),
     deadline: tupleFieldInt(value, "deadline", field),
     voteCount: tupleFieldInt(value, "vote_count", field),
     revoteCount: tupleFieldInt(value, "revote_count", field),
+  };
+
+  if (kind === "temperature_check") {
+    const outcomeInner = optionInner(value, "outcome", field);
+    let outcome: { result: string; recordedAt: number } | null = null;
+    if (outcomeInner !== null) {
+      const result = asString(outcomeInner["variant_name"]);
+      if (result !== "Passed" && result !== "Failed") {
+        throw new WeightRuleError(`${field}: outcome: unknown variant ${result ?? "(none)"}`);
+      }
+      outcome = { result, recordedAt: tupleFieldInt(outcomeInner, "recorded_at", `${field} outcome.${result}`) };
+    }
+    const continuationInner = optionInner(value, "continuation", field);
+    let continuation: { kind: string; id: number } | null = null;
+    if (continuationInner !== null) {
+      const variant = asString(continuationInner["variant_name"]);
+      if (variant !== "Proposal" && variant !== "MajorityJudgmentElection") {
+        throw new WeightRuleError(`${field}: continuation: unknown variant ${variant ?? "(none)"}`);
+      }
+      continuation = {
+        kind: variant === "Proposal" ? "proposal" : "majority_judgment_election",
+        id: scalarInt(asArray(continuationInner["fields"])[0], `${field} continuation.${variant}`),
+      };
+    }
+    return {
+      ...common,
+      snapshot: tupleFieldInt(value, "snapshot", field),
+      outcome,
+      continuation,
+      maxSelections: null,
+    };
+  }
+
+  const maxInner = optionInner(value, "max_selections", field);
+  return {
+    ...common,
+    snapshot: null,
+    outcome: null,
+    continuation: null,
+    maxSelections: maxInner === null ? null : scalarInt(maxInner, `${field} max_selections`),
   };
 }
 
@@ -352,14 +481,16 @@ function sumLegs(
 }
 
 /**
- * The official rule, recomputed: the app's own weight function — direct XRD, every active
- * validator's LSUs, LSULP and the allowlisted positions, which is what `weights` already holds
- * because the caller computed it under the ALLOWLIST as its register — summed per Poll option and
- * gated by `ballot_source`'s own absolute `official_quorum` / `official_approval_threshold`.
+ * The official rule, recomputed: the app's own weight function — direct XRD, every validator's
+ * LSUs, LSULP and the allowlisted positions, which is what `weights` already holds because the
+ * caller computed it under the ALLOWLIST as its register — summed per option.
  *
- * Assumes a binary Approve/Reject bar — every mirror document this tool has seen publishes one,
- * matching the official component's own Temperature-Check and binary-Proposal shape — and refuses
- * (MALFORMED) rather than guess at a multi-select official bar nothing specifies.
+ * The official leg takes the same bar as the OTER leg: the official vote's own absolute quorum
+ * and approval threshold, plus the framework's Minimum Affirmative Support and distinct-voter
+ * floor for its parameter set. Every counted ballot enters `total_weight` (and so quorum),
+ * Abstain included; only the Approve and Reject sides enter the decisive share. `approved` is
+ * `null` when the vote has no decision sides — a label set other than Approve/Reject(/Abstain),
+ * a multi-select proposal, or a parameter set the framework table does not name.
  */
 function officialRuleFigures(
   ballots: Map<string, number[]>,
@@ -368,32 +499,34 @@ function officialRuleFigures(
   optionCount: number,
   quorum: Dec,
   approvalThresholdPc: Dec,
-): { totals: Dec[]; totalWeight: Dec; quorumMet: boolean; approved: boolean } {
-  if (optionCount !== 2) {
-    throw new WeightRuleError(
-      `the official rule is only defined here for a binary Approve/Reject bar; this document's ` +
-        `option space has width ${optionCount}`,
-    );
-  }
-  const totals = [Dec.ZERO, Dec.ZERO];
+  sides: Sides | null,
+  mas: Dec,
+  minUniqueVoters: number,
+): { totals: Dec[]; totalWeight: Dec; quorumMet: boolean; approved: boolean | null } {
+  const totals: Dec[] = Array.from({ length: optionCount }, () => Dec.ZERO);
   let totalWeight = Dec.ZERO;
+  let voters = 0;
   for (const [account, selection] of ballots) {
     if (barred.has(account)) continue;
     const weight = weights.get(account) ?? Dec.ZERO;
+    voters++;
     totalWeight = totalWeight.add(weight);
     for (const idx of selection) {
-      if (idx === 0 || idx === 1) totals[idx] = (totals[idx] as Dec).add(weight);
+      if (idx >= 0 && idx < optionCount) totals[idx] = (totals[idx] as Dec).add(weight);
     }
   }
-  const quorumMet = totalWeight.gte(quorum);
-  const approved = bindingApproved(
-    totals[1] as Dec,
-    totals[0] as Dec,
-    approvalThresholdPc,
-    Dec.ZERO, // the official rule carries no MAS floor
-    quorumMet,
-    true, // mirror documents are always tally_doc_version 20+: inclusive comparison
-  );
+  const quorumMet = totalWeight.gte(quorum) && voters >= minUniqueVoters;
+  const approved =
+    sides === null
+      ? null
+      : bindingApproved(
+          totals[sides.approve] ?? Dec.ZERO,
+          totals[sides.reject] ?? Dec.ZERO,
+          approvalThresholdPc,
+          mas,
+          quorumMet,
+          true, // mirror documents are always tally_doc_version 20+: inclusive comparison
+        );
   return { totals, totalWeight, quorumMet, approved };
 }
 
@@ -441,7 +574,7 @@ async function resolveStateVersionAtTimestamp(
  * would be one round trip per voter, where the two window bounds are two round trips for the
  * whole vote. The comparison is exact either way — state version is monotone in ledger time."
  *
- * Both bounds are themselves resolved from `official_start` / `official_deadline` by
+ * Both bounds are themselves resolved from `official_snapshot` / `official_deadline` by
  * {@link resolveStateVersionAtTimestamp} — the caller's job, not this pure function's, exactly as
  * the engine separates the comparison from the two timestamp lookups that produce its bounds.
  * `upperBoundSv` is `Number.MAX_SAFE_INTEGER` while the deadline is still in the future (the
@@ -459,7 +592,7 @@ function ballotsOutsideWindow(ballots: OfficialBallot[], lowerBoundSv: number, u
 }
 
 /**
- * Every mirror-specific check (a), (b), (d), (e) — everything `ballot_source` adds on top of the
+ * Every mirror-specific check (a), (b), (d), (e), (f) — everything `ballot_source` adds on top of the
  * ordinary v20 pipeline that `src/verify.ts` already runs unchanged for (c). `[]` on an ordinary
  * document (`doc.isMirror` false); the caller is expected to skip calling this in that case, but
  * it is harmless either way.
@@ -489,6 +622,23 @@ export async function verifyMirrorBallots(
   check("ballot_source.(a) official_deadline", String(bs.officialDeadline), String(entry.deadline));
   check("ballot_source.(a) official_vote_count", String(bs.officialVoteCount), String(entry.voteCount));
   check("ballot_source.(a) official_revote_count", String(bs.officialRevoteCount), String(entry.revoteCount));
+  check("ballot_source.(a) official_parameter_set", canonicalize(bs.officialParameterSet as unknown as Json), canonicalize(entry.parameterSet as unknown as Json));
+  check("ballot_source.(a) official_snapshot", String(bs.officialSnapshot), String(entry.snapshot ?? entry.start));
+  check("ballot_source.(a) official_outcome", canonicalize(bs.officialOutcome as unknown as Json), canonicalize(entry.outcome as unknown as Json));
+  check("ballot_source.(a) official_continuation", canonicalize(bs.officialContinuation as unknown as Json), canonicalize(entry.continuation as unknown as Json));
+  check("ballot_source.(a) official_max_selections", String(bs.officialMaxSelections), String(entry.maxSelections));
+
+  // (f) the framework bar, derived from the RE-READ set and quorum, never from the document's.
+  const framework = frameworkFor(bs.kind, entry.parameterSet.id, entry.quorum);
+  const raw = asObject(doc.raw);
+  check("ballot_source.(f) eligible_voting_power", asString(raw["eligible_voting_power"]) ?? "absent", (framework?.eligible ?? Dec.ZERO).toString());
+  check("ballot_source.(f) min_affirmative_support", doc.minAffirmativeSupport.toString(), (framework?.mas ?? Dec.ZERO).toString());
+  check("ballot_source.(f) min_unique_voters", String(doc.minUniqueVoters), String(framework?.minUniqueVoters ?? 0));
+  check(
+    "ballot_source.(f) framework",
+    canonicalize(bs.framework === null ? null : ({ source: bs.framework.source, quorum_pc: bs.framework.quorumPc.toString(), mas_pc: bs.framework.masPc.toString(), min_unique_voters: bs.framework.minUniqueVoters, derivation: bs.framework.derivation, bound: bs.framework.bound.toString() } as unknown as Json)),
+    canonicalize(framework === null ? null : ({ source: FRAMEWORK_SOURCE, quorum_pc: framework.quorumPc.toString(), mas_pc: framework.masPc.toString(), min_unique_voters: framework.minUniqueVoters, derivation: ELIGIBLE_DERIVATION, bound: framework.bound.toString() } as unknown as Json)),
+  );
 
   // (a) the ballots themselves — the register's `voters` KVS, latest per account.
   const ballots = await readOfficialBallots(gw, entry.votersKvsAddress, bs.kind, bs.ballotStateVersion);
@@ -532,13 +682,17 @@ export async function verifyMirrorBallots(
     accounts.map((a) => [a, officialBreakdown.get(a)?.total ?? Dec.ZERO]),
   );
   const publishedBallots = new Map(doc.votes.map((v) => [v.account, v.selection]));
+  // The official threshold is a fraction (0.5); the bar compares against a percentage.
   const official = officialRuleFigures(
     publishedBallots,
     officialWeights,
     barred,
     doc.totals.length,
     bs.officialQuorum,
-    bs.officialApprovalThreshold,
+    bs.officialApprovalThreshold.mul(Dec.fromInt(100)),
+    framework === null ? null : decisionSides(bs.kind, doc.options, bs.officialMaxSelections),
+    framework?.mas ?? Dec.ZERO,
+    framework?.minUniqueVoters ?? 0,
   );
   for (let i = 0; i < Math.max(official.totals.length, bs.officialRule.totals.length); i++) {
     check(
@@ -568,10 +722,11 @@ export async function verifyMirrorBallots(
 
   // (d) ballots outside the window: both bounds resolved from the official timestamps via the
   // SAME Gateway timestamp selector the engine's own state-version lookup uses — see
-  // `resolveStateVersionAtTimestamp` and `ballotsOutsideWindow` above. `vote_start_state_version`
-  // is always resolved (a ballot's window cannot open in the future); `deadline_state_version` is
-  // unbounded while `official_deadline` has not yet passed.
-  const lowerBoundSv = await resolveStateVersionAtTimestamp(gw, xrdResource, bs.officialStart);
+  // `resolveStateVersionAtTimestamp` and `ballotsOutsideWindow` above. The lower bound is the
+  // snapshot's state version (`official_snapshot`, which (a) has just checked against the
+  // entry) and is always resolved; the upper bound is unbounded while `official_deadline` has
+  // not yet passed.
+  const lowerBoundSv = await resolveStateVersionAtTimestamp(gw, xrdResource, bs.officialSnapshot);
   const nowSeconds = Math.floor(Date.now() / 1000);
   const upperBoundSv =
     bs.officialDeadline > nowSeconds

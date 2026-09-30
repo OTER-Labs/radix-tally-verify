@@ -24,6 +24,7 @@ import { Dec } from "./decimal.ts";
 import { delegatedWeightByDelegate, resolveDelegations } from "./delegation.ts";
 import type { ResolvedDelegation, SnapshotDelegation } from "./delegation.ts";
 import type { Json } from "./canonical.ts";
+import type { Sides } from "./framework.ts";
 
 /** The five grades of the framework's scale, highest first. Ordinal 0 is Excellent, 4 is
  * Poor — the ordering is load-bearing, since "at or above grade g" is the whole qualifying
@@ -76,12 +77,10 @@ export interface Ballot {
 /** Everything about the consultation the verdict needs, taken from the document. */
 export interface VerdictSpec {
   kind: string;
-  /** Mirror documents (`ballot_source` present) are `kind: "Poll"` yet publish the binary
-   * verdict fields — the mirror rule treats any TWO-option official vote as binding, with the
-   * affirmative side at `For` (index 1) for a temperature check and at option 0 for a proposal.
-   * Set from `ballot_source.kind`;
-   * absent on every non-mirror document. */
-  binarySides?: { affirmative: number; negative: number } | undefined;
+  /** Mirror documents (`ballot_source` present): the sides `decisionSides` found for the
+   * official vote (null = no sides) and whether its parameter set is in the framework table (a
+   * set the table does not name decides nothing). Absent on every non-mirror document. */
+  mirror?: { sides: Sides | null; framework: boolean } | undefined;
   /** Width of the option space — the document's `totals` length. For a Majority Judgment
    * election it is five times the candidate count, because the MJ ballot grades every
    * candidate and `totals` is the raw per-(candidate, grade) distribution. */
@@ -627,35 +626,46 @@ export function deriveFigures(
   // Approve/Reject only mean something for a Binding consultation, whose option list is fixed
   // at [Reject, Approve]. Elsewhere there is no single affirmative side, so the verdict is
   // null rather than invented.
-  // A mirror document is the other binary case: `kind: "Poll"`, sides named by the official
-  // vote's kind (see `VerdictSpec.binarySides`). Its `mas_met` is published as `true` on a
-  // binary vote — the official rule states no MAS floor — so it is reproduced, not recomputed.
+  // A mirror document is the other decided case: `kind: "Poll"`, sides found by LABEL
+  // (`decisionSides`: For/Against on a Temperature Check, Approve/Reject/Abstain on a Proposal),
+  // never by position. A mirror whose parameter set the framework table does not name publishes
+  // its sides' weights but decides nothing: `mas_met` and `approved` are null.
+  // A side the option space does not hold (labels and totals of different lengths) is no side.
+  const inSpace = (i: number | null): boolean => i === null || (i >= 0 && i < totals.length);
+  const claimedSides = spec.mirror?.sides ?? null;
+  const mirrorSides =
+    claimedSides !== null && inSpace(claimedSides.approve) && inSpace(claimedSides.reject) && inSpace(claimedSides.abstain)
+      ? claimedSides
+      : null;
   const sides =
-    totals.length !== 2
-      ? null
-      : spec.kind === "Binding"
+    spec.mirror !== undefined
+      ? mirrorSides === null
+        ? null
+        : { affirmative: mirrorSides.approve, negative: mirrorSides.reject }
+      : totals.length === 2 && spec.kind === "Binding"
         ? { affirmative: 1, negative: 0 }
-        : (spec.binarySides ?? null);
-  const binding = sides !== null;
+        : null;
+  // A mirror's Abstain option is abstention: outside the decisive share, inside participation.
+  if (mirrorSides !== null && mirrorSides.abstain !== null) {
+    abstainWeight = abstainWeight.add(totals[mirrorSides.abstain] ?? Dec.ZERO);
+  }
+  const decides = sides !== null && (spec.mirror === undefined || spec.mirror.framework);
   const approveWeight = sides ? (totals[sides.affirmative] as Dec) : null;
   const rejectWeight = sides ? (totals[sides.negative] as Dec) : null;
-  const masMet = sides
-    ? spec.binarySides
-      ? true
-      : (totals[sides.affirmative] as Dec).gte(spec.minAffirmativeSupport)
-    : null;
-  const approved = sides
-    ? bindingApproved(
-        totals[sides.affirmative] as Dec,
-        totals[sides.negative] as Dec,
-        spec.approvalThresholdPc,
-        spec.minAffirmativeSupport,
-        quorumMet,
-        // The document's own comparison, not this verifier's vintage — the same discipline the
-        // Grade Quantile follows.
-        approvalBarIsInclusive(spec.tallyDocVersion),
-      )
-    : null;
+  const masMet = decides && sides ? (totals[sides.affirmative] as Dec).gte(spec.minAffirmativeSupport) : null;
+  const approved =
+    decides && sides
+      ? bindingApproved(
+          totals[sides.affirmative] as Dec,
+          totals[sides.negative] as Dec,
+          spec.approvalThresholdPc,
+          spec.minAffirmativeSupport,
+          quorumMet,
+          // The document's own comparison, not this verifier's vintage — the same discipline the
+          // Grade Quantile follows.
+          approvalBarIsInclusive(spec.tallyDocVersion),
+        )
+      : null;
 
   // Missing quorum means no winners, not "the winners, but ignore them" — a reader who sees
   // a filled seat list will act on it. Plurality is the fallback when an election names no rule,

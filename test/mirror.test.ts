@@ -15,6 +15,7 @@ import { test } from "node:test";
 
 import { tallyHash } from "../src/canonical.ts";
 import type { Json } from "../src/canonical.ts";
+import { ELIGIBLE_DERIVATION, FRAMEWORK_SOURCE } from "../src/framework.ts";
 import { verifyTallyDocument } from "../src/verify.ts";
 
 import { FakeGateway, SNAPSHOT_SV, XRD } from "./fake-gateway.ts";
@@ -23,7 +24,7 @@ const hash = (doc: Record<string, unknown>): string => tallyHash(doc as unknown 
 
 // A STOKENET governance component: `officialAllowlistFor` picks the shipped list by the
 // address's own bech32 prefix, and the stokenet list names no DEX position (none of the three
-// DEXes deploys there), so the official rule here is direct XRD plus every active validator's
+// DEXes deploys there), so the official rule here is direct XRD plus every validator's
 // LSUs — Tier 1, and exactly what a test stack can produce. The mainnet list's own content and
 // hash are checked directly in `allowlist.test.ts` rather than driven through a fake Gateway
 // that would have to serve sixty-nine pools.
@@ -32,7 +33,7 @@ const COMPONENT = "component_tdx_2_1cp0governance0000000000000000000000000000000
 const STOKENET_ALLOWLIST_HASH = "c2c013c86a9c92e22f966f3d8617768f8b7a44c902adcc097bfa1e098afb4e1f";
 const OFFICIAL_RULE_TEXT =
   "The Radix DAO Consultation App's own rule at snapshot_state_version: direct XRD at par, plus " +
-  "the stake units of every active validator at their underlying XRD value, plus LSULP at its " +
+  "the stake units of every validator at their underlying XRD value, plus LSULP at its " +
   "underlying liquid-staked XRD value, plus the XRD, LSU and LSULP side of each position on the " +
   "app's static DEX allowlist.";
 const TC_REGISTER_KVS = "internal_keyvaluestore_rdx1kvtc0000000000000000000000000000000008";
@@ -57,7 +58,9 @@ const BALLOT_SV = SNAPSHOT_SV + 50;
  * `weight_delta_by_source` leg is zero. A staked voter weighing the same under both rules is the
  * whole point of the rule as it now stands: an earlier version of this fixture's official leg
  * dropped the 25. Both use the
- * official absolute quorum 100 / threshold 50. */
+ * official absolute quorum 100 / threshold 0.5 (published as 50 %), and the framework's
+ * Temperature Check bar: 3 % of a derived eligible voting power of 3333.333… (100 * 100 / 3), no
+ * MAS, no voter floor. */
 function mirrorDoc(over: Record<string, unknown> = {}, ballotSourceOver: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     tally_doc_version: 20,
@@ -90,8 +93,9 @@ function mirrorDoc(over: Record<string, unknown> = {}, ballotSourceOver: Record<
     approve_weight: "145",
     reject_weight: "30",
     approved: true,
+    eligible_voting_power: "3333.333333333333333333",
     ballot_source: {
-      mirror_doc_version: 2,
+      mirror_doc_version: 3,
       component: COMPONENT,
       blueprint: "Governance",
       kind: "temperature_check",
@@ -99,7 +103,7 @@ function mirrorDoc(over: Record<string, unknown> = {}, ballotSourceOver: Record<
       official_start: OFFICIAL_START,
       official_deadline: OFFICIAL_DEADLINE,
       official_quorum: "100",
-      official_approval_threshold: "50",
+      official_approval_threshold: "0.5",
       official_vote_count: 4,
       official_revote_count: 1,
       ballot_count: 3,
@@ -128,6 +132,19 @@ function mirrorDoc(over: Record<string, unknown> = {}, ballotSourceOver: Record<
         lsulp: "0",
         precision_pools: "0",
         shape_pools: "0",
+      },
+      official_snapshot: OFFICIAL_START,
+      official_parameter_set: { id: "default", label: "Standard Executable", version: 1, variant: "Standard" },
+      official_outcome: null,
+      official_continuation: null,
+      official_max_selections: null,
+      framework: {
+        source: FRAMEWORK_SOURCE,
+        quorum_pc: "3",
+        mas_pc: "0",
+        min_unique_voters: 0,
+        eligible_voting_power_derivation: ELIGIBLE_DERIVATION,
+        eligible_voting_power_bound: "33.333333333333333333",
       },
       ...ballotSourceOver,
     },
@@ -193,28 +210,42 @@ function tcRegisterKeys(): unknown {
   return { items: [{ key: { programmatic_json: { value: "5" } } }], next_cursor: null };
 }
 
-function tcRegisterData(entryOver: Record<string, string> = {}): unknown {
-  const fields: Record<string, string> = {
-    voters: VOTERS_KVS,
-    quorum: "100",
-    approval_threshold: "50",
-    start: String(OFFICIAL_START),
-    deadline: String(OFFICIAL_DEADLINE),
-    vote_count: "4",
-    revote_count: "1",
-    ...entryOver,
-  };
-  return {
-    entries: [
-      {
-        value: {
-          programmatic_json: {
-            fields: Object.entries(fields).map(([field_name, value]) => ({ field_name, value })),
-          },
+/** The Temperature Check entry in the Governance 1.0.0 shape: quorum and threshold on the
+ * `temperature_check` leg of its own `Standard` parameter-set snapshot, plus its own `snapshot`,
+ * and no outcome or continuation recorded yet. */
+function tcRegisterData(
+  over: { setId?: string; quorum?: string; threshold?: string; deadline?: string } = {},
+): unknown {
+  const s = (field_name: string, value: string) => ({ field_name, value });
+  const fields = [
+    s("voters", VOTERS_KVS),
+    {
+      field_name: "parameter_set",
+      kind: "Tuple",
+      fields: [
+        s("id", over.setId ?? "default"),
+        s("label", "Standard Executable"),
+        s("version", "1"),
+        {
+          field_name: "parameters",
+          kind: "Enum",
+          variant_name: "Standard",
+          fields: [
+            { field_name: "temperature_check", kind: "Tuple", fields: [s("voting_days", "5"), s("quorum", over.quorum ?? "100"), s("approval_threshold", over.threshold ?? "0.5")] },
+            { field_name: "proposal", kind: "Tuple", fields: [s("voting_days", "7"), s("quorum", "1000"), s("approval_threshold", "0.5")] },
+          ],
         },
-      },
-    ],
-  };
+      ],
+    },
+    s("snapshot", String(OFFICIAL_START)),
+    s("start", String(OFFICIAL_START)),
+    s("deadline", over.deadline ?? String(OFFICIAL_DEADLINE)),
+    s("vote_count", "4"),
+    s("revote_count", "1"),
+    { field_name: "outcome", kind: "Enum", variant_name: "None", fields: [] },
+    { field_name: "continuation", kind: "Enum", variant_name: "None", fields: [] },
+  ];
+  return { entries: [{ value: { programmatic_json: { fields } } }] };
 }
 
 function votersKeys(): unknown {
@@ -462,6 +493,33 @@ test("(b) an allowlist hash the verifier does not carry is a figures disagreemen
   assert.equal(digest?.recomputed, STOKENET_ALLOWLIST_HASH);
 });
 
+test("(f) a wrong eligible_voting_power is a figures disagreement naming (f)", async () => {
+  const doc = mirrorDoc({ eligible_voting_power: "3333" });
+  const out = await verifyTallyDocument(doc, hash(doc), mirrorGateway(), XRD);
+  assert.equal(out.kind, "figures");
+  assert.ok(out.kind === "figures" && out.differences.some((d) => d.field.startsWith("ballot_source.(f)")));
+});
+
+test("(a) a parameter set the chain does not carry is a figures disagreement naming (a)", async () => {
+  const doc = mirrorDoc({}, { official_parameter_set: { id: "dao-governance", label: "Standard Executable", version: 1, variant: "Standard" } });
+  const out = await verifyTallyDocument(doc, hash(doc), mirrorGateway(), XRD);
+  assert.equal(out.kind, "figures");
+  assert.ok(out.kind === "figures" && out.differences.some((d) => d.field === "ballot_source.(a) official_parameter_set"));
+});
+
+test("a mirror_doc_version 2 block is refused rather than checked under v3", async () => {
+  const doc = mirrorDoc({}, { mirror_doc_version: 2 });
+  const out = await verifyTallyDocument(doc, hash(doc), mirrorGateway(), XRD);
+  assert.equal(out.kind, "malformed");
+});
+
+test("a Majority Judgment mirror is refused as not implemented", async () => {
+  const doc = mirrorDoc({}, { kind: "majority_judgment_election" });
+  const out = await verifyTallyDocument(doc, hash(doc), mirrorGateway(), XRD);
+  assert.equal(out.kind, "malformed");
+  assert.ok(out.kind === "malformed" && out.reason.includes("Majority Judgment"));
+});
+
 /** A version-1 block states the official rule as liquid XRD only. It is refused at PARSE time
  * rather than recomputed under version 2's rule, which would compare a number against a rule
  * that did not produce it. */
@@ -550,4 +608,188 @@ test("(e) a stale weight_delta_by_source leg is a figures disagreement naming (e
   // so the honest delta is zero and a document still claiming 25 is claiming a rule nobody applies.
   assert.equal(d?.document, "25");
   assert.equal(d?.recomputed, "0");
+});
+
+// --- An official Proposal: three options decided by label, Abstain counted toward quorum only. ---
+
+const GP_REGISTER_KVS = "internal_keyvaluestore_rdx1kvgp0000000000000000000000000000000010";
+const GP_OPTIONS = ["Reject", "Abstain", "Approve"];
+
+/** The Proposal entry in the Governance 1.0.0 shape: its own `Standard` parameter-set snapshot,
+ * read on the `proposal` leg; no `snapshot`, `outcome` or `continuation`; `max_selections` None. */
+function gpRegisterData(setId: string): unknown {
+  const s = (field_name: string, value: string) => ({ field_name, value });
+  const fields = [
+    { field_name: "vote_options", kind: "Array", elements: [] },
+    { field_name: "max_selections", kind: "Enum", variant_name: "None", fields: [] },
+    s("temperature_check_id", "5"),
+    s("voters", VOTERS_KVS),
+    {
+      field_name: "parameter_set",
+      kind: "Tuple",
+      fields: [
+        s("id", setId),
+        s("label", "Treasury"),
+        s("version", "1"),
+        {
+          field_name: "parameters",
+          kind: "Enum",
+          variant_name: "Standard",
+          fields: [
+            { field_name: "temperature_check", kind: "Tuple", fields: [s("voting_days", "5"), s("quorum", "30"), s("approval_threshold", "0.5")] },
+            { field_name: "proposal", kind: "Tuple", fields: [s("voting_days", "7"), s("quorum", "140"), s("approval_threshold", "0.5")] },
+          ],
+        },
+      ],
+    },
+    s("start", String(OFFICIAL_START)),
+    s("deadline", String(OFFICIAL_DEADLINE)),
+    s("vote_count", "3"),
+    s("revote_count", "0"),
+  ];
+  return { entries: [{ value: { programmatic_json: { fields } } }] };
+}
+
+/** One `ProposalVoterEntry`: `options` is an array of `ProposalVoteOptionId(U32)` tuples. */
+function gpVoterEntry(account: string, option: number, lastUpdatedAtStateVersion: number) {
+  return {
+    key: { programmatic_json: { value: account } },
+    value: {
+      programmatic_json: {
+        fields: [
+          { field_name: "vote_id", value: "1" },
+          { field_name: "options", kind: "Array", elements: [{ kind: "Tuple", fields: [{ kind: "U32", value: String(option) }] }] },
+        ],
+      },
+    },
+    last_updated_at_state_version: lastUpdatedAtStateVersion,
+  };
+}
+
+function gpGateway(setId: string): FakeGateway {
+  return new FakeGateway()
+    .onDetails({
+      items: [
+        {
+          address: COMPONENT,
+          details: {
+            blueprint_name: "Governance",
+            state: { fields: [{ field_name: "proposals", value: GP_REGISTER_KVS }] },
+          },
+        },
+      ],
+    })
+    .onDetails(accountsFungibles())
+    .onDetails(resourceInfo())
+    .onDetails(accountsFungibles())
+    .onDetails(resourceInfo())
+    .onDetails(accountsFungibles())
+    .onDetails(resourceInfo())
+    .onValidators(validatorsResponse())
+    .onValidators(validatorsResponse())
+    .onValidators(validatorsResponse())
+    .onTimestampDetails(timestampDetails(SNAPSHOT_SV)) // (d) official_snapshot (= start)
+    .onTimestampDetails(timestampDetails(BALLOT_SV)) // (d) official_deadline
+    .onKvsKeys(GP_REGISTER_KVS, { items: [{ key: { programmatic_json: { value: "7" } } }], next_cursor: null })
+    .onKvsData(GP_REGISTER_KVS, gpRegisterData(setId))
+    .onKvsKeys(VOTERS_KVS, votersKeys())
+    .onKvsData(VOTERS_KVS, {
+      entries: [
+        gpVoterEntry(ACC_LIQUID, 2, SNAPSHOT_SV + 10), // Approve, 100
+        gpVoterEntry(ACC_STAKED, 1, SNAPSHOT_SV + 30), // Abstain, 45 (20 XRD + 25 XRD of LSU)
+        gpVoterEntry(ACC_REVOTER, 0, BALLOT_SV), // Reject, 30
+      ],
+    });
+}
+
+/**
+ * A mirror of official Proposal 7, options `["Reject", "Abstain", "Approve"]` — Approve LAST, so
+ * a positional reading gets the sides wrong. Approve 100, Abstain 45, Reject 30: the Abstain
+ * weight is in `total_weight` (quorum 140 is met only with it) and in `abstain_weight`, and
+ * outside the decisive share (100 of 130 approves at 50 %).
+ *
+ * `default`: 5 % quorum → eligible 140 * 100 / 5 = 2800, MAS 1 % = 28 — met.
+ * `dao-treasury`: 7 % quorum → eligible 2000, MAS 1.5 % = 30 — met, but its 50-voter floor is
+ * not (three voters), so quorum fails and nothing is approved, on both legs.
+ */
+function gpDoc(setId: "default" | "dao-treasury"): Record<string, unknown> {
+  const treasury = setId === "dao-treasury";
+  const framework = treasury
+    ? { quorum_pc: "7", mas_pc: "1.5", min_unique_voters: 50, bound: "14.285714285714285714", eligible: "2000", mas: "30" }
+    : { quorum_pc: "5", mas_pc: "1", min_unique_voters: 0, bound: "20", eligible: "2800", mas: "28" };
+  const quorumMet = !treasury;
+  return mirrorDoc(
+    {
+      consultation_id: "official:proposal:7",
+      options: GP_OPTIONS,
+      votes: [
+        { account: ACC_LIQUID, selection: [2], weight: "100" },
+        { account: ACC_STAKED, selection: [1], weight: "45" },
+        { account: ACC_REVOTER, selection: [0], weight: "30" },
+      ],
+      totals: ["30", "45", "100"],
+      total_weight: "175",
+      abstain_weight: "45",
+      quorum: "140",
+      min_affirmative_support: framework.mas,
+      min_unique_voters: framework.min_unique_voters,
+      quorum_met: quorumMet,
+      mas_met: true,
+      approve_weight: "100",
+      reject_weight: "30",
+      approved: quorumMet,
+      eligible_voting_power: framework.eligible,
+    },
+    {
+      kind: "proposal",
+      official_id: 7,
+      official_quorum: "140",
+      official_vote_count: 3,
+      official_revote_count: 0,
+      official_rule: {
+        rule: OFFICIAL_RULE_TEXT,
+        allowlist_version: "2026-09-06",
+        allowlist_hash: STOKENET_ALLOWLIST_HASH,
+        totals: ["30", "45", "100"],
+        totals_by_source: { liquid: "150", lsu: "25", lsulp: "0", pool_units: "0", precision_pools: "0", shape_pools: "0" },
+        total_weight: "175",
+        quorum_met: quorumMet,
+        approved: quorumMet,
+      },
+      official_snapshot: OFFICIAL_START,
+      official_parameter_set: { id: setId, label: "Treasury", version: 1, variant: "Standard" },
+      framework: {
+        source: FRAMEWORK_SOURCE,
+        quorum_pc: framework.quorum_pc,
+        mas_pc: framework.mas_pc,
+        min_unique_voters: framework.min_unique_voters,
+        eligible_voting_power_derivation: ELIGIBLE_DERIVATION,
+        eligible_voting_power_bound: framework.bound,
+      },
+    },
+  );
+}
+
+test("a three-option proposal decides by label, Abstain toward quorum only, and is a MATCH", async () => {
+  const doc = gpDoc("default");
+  const out = await verifyTallyDocument(doc, hash(doc), gpGateway("default"), XRD);
+  assert.deepEqual(out, { kind: "match", hashChecked: true });
+});
+
+test("the dao-treasury voter floor fails quorum on both legs, and is a MATCH", async () => {
+  const doc = gpDoc("dao-treasury");
+  const out = await verifyTallyDocument(doc, hash(doc), gpGateway("dao-treasury"), XRD);
+  assert.deepEqual(out, { kind: "match", hashChecked: true });
+});
+
+test("a proposal document that decides by position is a figures disagreement", async () => {
+  // A positional reading takes option 0 (Reject) as the affirmative side: approve 30, reject 45.
+  const doc = gpDoc("default");
+  doc["approve_weight"] = "30";
+  doc["reject_weight"] = "45";
+  doc["approved"] = false;
+  const out = await verifyTallyDocument(doc, null, gpGateway("default"), XRD);
+  assert.equal(out.kind, "figures");
+  const fields = out.kind === "figures" ? out.differences.map((d) => d.field) : [];
+  assert.ok(fields.includes("approve_weight") && fields.includes("approved"), JSON.stringify(fields));
 });

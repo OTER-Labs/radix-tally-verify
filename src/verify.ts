@@ -17,6 +17,7 @@ import { WeightRuleError } from "./concentrated.ts";
 import { Dec } from "./decimal.ts";
 import { DocumentError, parseTallyDocument } from "./document.ts";
 import type { TallyDocument } from "./document.ts";
+import { decisionSides } from "./framework.ts";
 import { GatewayError } from "./gateway.ts";
 import type { GatewayClient } from "./gateway.ts";
 import { verifyMirrorBallots } from "./mirror.ts";
@@ -254,10 +255,13 @@ export async function verifyTallyDocument(
         gradeQuantile: doc.gradeQuantile,
         delegationInput: doc.delegationInput,
         tallyDocVersion: doc.tallyDocVersion,
-        binarySides: doc.ballotSource
-          ? doc.ballotSource.kind === "temperature_check"
-            ? { affirmative: 1, negative: 0 }
-            : { affirmative: 0, negative: 1 }
+        // A mirror's `min_affirmative_support` and `min_unique_voters` are the document's own;
+        // check (f) has already compared both against the re-read parameter set.
+        mirror: doc.ballotSource
+          ? {
+              sides: decisionSides(doc.ballotSource.kind, doc.options, doc.ballotSource.officialMaxSelections),
+              framework: doc.ballotSource.framework !== null,
+            }
           : undefined,
       },
       doc.votes,

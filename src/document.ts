@@ -289,6 +289,12 @@ export interface TallyDocument {
   tallyDocVersion: number | null;
   consultationId: string;
   kind: string;
+  /**
+   * The option labels, in option-index order. Carried inside the hash, never recomputed; a
+   * mirror of an official Proposal reads its decision sides off them (`decisionSides`). `[]`
+   * when the document publishes none.
+   */
+  options: string[];
   snapshotStateVersion: number;
   /**
    * v22: which SPACE this consultation belongs to. `0` — the Radix/XRD space — is both the
@@ -770,6 +776,17 @@ function parseGradeQuantile(mjRaw: unknown): GradeQuantile | null {
   return { numerator: num, denominator: den };
 }
 
+/** The document's `options`: absent or null is `[]`; present, every entry must be a string. */
+function parseOptions(raw: unknown): string[] {
+  if (raw === null || raw === undefined) return [];
+  if (!Array.isArray(raw)) fail("options", "is neither absent nor an array");
+  return raw.map((o, i) => {
+    const s = asString(o);
+    if (s === null) fail(`options[${i}]`, "is not a string");
+    return s;
+  });
+}
+
 const MIRROR_KINDS: readonly MirrorKind[] = ["temperature_check", "proposal"];
 
 /**
@@ -1064,6 +1081,7 @@ export function parseTallyDocument(input: unknown): { doc: TallyDocument; envelo
     tallyDocVersion: optInt(raw, "tally_doc_version"),
     consultationId: reqString(raw, "consultation_id"),
     kind,
+    options: parseOptions(raw["options"]),
     snapshotStateVersion,
     spaceId: optInt(raw, "space_id") ?? 0,
     weightConfig: parseWeightConfig(raw["weight_config"]),

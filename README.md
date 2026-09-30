@@ -87,10 +87,12 @@ noise:
   valid-ballots-only Participation rule, delegated weight riding the ballot it attached to, and
   the three seat rules (Plurality, SPAV, Majority Judgment) applied from the document's own
   stated parameters, down to the Grade Quantile it publishes.
-- **`src/mirror.ts`** and **`src/allowlist.ts`** — mirror-tally verification (`ballot_source`
-  present): re-reading the official Radix DAO component's own ballots, recomputing the
-  Consultation App's own rule from the static allowlist this package ships under `data/`, the
-  outside-window count, and the per-source gap between the two rules. See "Mirror tallies" below.
+- **`src/mirror.ts`**, **`src/allowlist.ts`** and **`src/framework.ts`** — mirror-tally
+  verification (`ballot_source` present): re-reading the official Radix DAO component's own
+  ballots and vote metadata, recomputing the Consultation App's own rule from the static allowlist
+  this package ships under `data/`, the outside-window count, the per-source gap between the two
+  rules, and the governance framework's bar (eligible voting power, MAS, the voter floor) for the
+  vote's parameter set. See "Mirror tallies" below.
 - **`src/verify.ts` / `src/cli.ts`** — orchestration and the command line. `--mirror` is not a
   flag: a document carrying `ballot_source` gets the extra checks automatically.
 - **`test/`** — cross-implementation agreement, plus weight, concentrated-liquidity, delegation
@@ -311,8 +313,18 @@ For every Temperature Check and Proposal on the official Radix DAO Consultation 
 OTER can publish a document that reads the SAME on-chain ballots and tallies them twice: under the
 **official rule** — the Consultation App's own policy, which reproduces their published number and
 so proves the same ballots were read — and under the **OTER rule**, that platform's own
-`WEIGHT_RULE`. Both are gated by the official vote's own absolute `quorum` and
-`approval_threshold`, so the only thing the two results can disagree about is the weight function.
+`WEIGHT_RULE`. Both take ONE bar, the official vote's own: the absolute `quorum` and
+`approval_threshold` of its parameter set, plus the governance framework's Minimum Affirmative
+Support (MAS) and distinct-voter floor for that set. The only thing the two results can disagree
+about is the weight function.
+
+The official component is the Radix DAO `Governance` 1.0.0 blueprint. Each vote carries its own
+snapshot of a **parameter set** (`id`, `label`, `version`, and a `Standard` or `MajorityJudgment`
+variant holding a `temperature_check` leg and, under `Standard`, a `proposal` leg); a vote's
+`quorum` and `approval_threshold` are read off its own leg. This verifier checks Temperature Check
+and Proposal mirrors. **Majority Judgment mirrors** (`ballot_source.kind`
+`majority_judgment_election` or `majority_judgment_election_rerun`) are refused as MALFORMED with
+"this verifier does not implement Majority Judgment mirror verification".
 
 ### What the official rule is
 
@@ -321,7 +333,9 @@ counts, and values in XRD:
 
 1. **direct XRD** — "1 XRD equals 1 vote";
 2. **validator LSUs** — "LSUs from every active Radix validator count for their underlying XRD
-   value", every validator, with no list;
+   value". In practice the app counts every validator's LSUs, with no list and no activity
+   filter, and so does this verifier; the document's rule text says "the stake units of every
+   validator";
 3. **LSULP** — at its underlying liquid-staked XRD value;
 4. **a static allowlist of DEX liquidity positions** — "This is the current static allowlist used
    when a vote is snapshotted." Only the XRD, LSU or LSULP side of a position counts; the other
@@ -358,12 +372,19 @@ ordinary v22 document does (`votes`, `totals`, `total_weight`, `quorum`, `approv
 the OTER-rule result exactly as an ordinary Poll would, plus one extra block:
 
 ```json
+"eligible_voting_power": "…",
 "ballot_source": {
-  "mirror_doc_version": 2,
+  "mirror_doc_version": 3,
   "component": "component_rdx1…", "blueprint": "Governance",
   "kind": "temperature_check" | "proposal", "official_id": 5,
   "official_start": 1784999200, "official_deadline": 1785431200,
+  "official_snapshot": 1784999200,
   "official_quorum": "402876916", "official_approval_threshold": "0.5",
+  "official_parameter_set": { "id": "default", "label": "Standard Executable",
+                               "version": 1, "variant": "Standard" },
+  "official_outcome": { "result": "Passed", "recorded_at": 1785431500 } | null,
+  "official_continuation": { "kind": "proposal", "id": 6 } | null,
+  "official_max_selections": null,
   "official_vote_count": 51, "official_revote_count": 3,
   "ballot_count": 48, "ballot_state_version": 542970896, "ballots_outside_window": 0,
   "official_rule": { "rule": "The Radix DAO Consultation App's own rule at snapshot_state_version: …",
@@ -372,11 +393,51 @@ the OTER-rule result exactly as an ordinary Poll would, plus one extra block:
                       "totals_by_source": { "liquid": "…", "lsu": "…", "lsulp": "…",
                                             "pool_units": "…", "precision_pools": "…",
                                             "shape_pools": "…" },
-                      "quorum_met": true, "approved": true },
+                      "quorum_met": true, "approved": true | null },
   "weight_delta_by_source": { "lsu": "…", "pool_units": "…", "lsulp": "…",
-                               "precision_pools": "…", "shape_pools": "…" }
+                               "precision_pools": "…", "shape_pools": "…" },
+  "framework": { "source": "RadixDAO/governance-framework@470a047 Parameters Registry §3.2, §3.3A, §8A",
+                 "quorum_pc": "3", "mas_pc": "0", "min_unique_voters": 0,
+                 "eligible_voting_power_derivation": "quorum * 100 / quorum_pc (…)",
+                 "eligible_voting_power_bound": "33.333333333333333333" } | null
 }
 ```
+
+`official_snapshot` is the Instant the weight snapshot anchors to: a Temperature Check's own
+`snapshot` field, a Proposal's `start` (a Proposal carries no snapshot of its own).
+`official_outcome` and `official_continuation` are a Temperature Check's recorded result and what
+it was elevated to (`proposal` or `majority_judgment_election`); both are null on a Proposal.
+`official_max_selections` is a Proposal's `max_selections` (null when single choice, and on every
+Temperature Check). All six v3 keys are written on every v3 document; a missing one is MALFORMED,
+never read as null.
+
+**The framework bar.** The on-chain parameter sets carry absolute quorums and no MAS; the
+governance framework's Parameters Registry fixes each set's quorum and MAS as percentages of
+**eligible voting power**, a figure nobody publishes. So it is derived, in the same truncating
+18-decimal arithmetic as everything else here:
+
+| parameter set | proposal quorum % | MAS % | min unique voters |
+|---|---|---|---|
+| `default` | 5 | 1 | 0 |
+| `dao-constitutional` | 10 | 3.5 | 0 |
+| `dao-governance` | 7 | 2 | 0 |
+| `dao-treasury` | 7 | 1.5 | 50 |
+
+A Temperature Check is 3 % under every set, with no MAS and no floor. `eligible_voting_power =
+quorum * 100 / quorum_pc` for the vote's own leg, and `min_affirmative_support = eligible * mas_pc
+/ 100`. Because the DAO truncated its absolute quorums to whole XRD, the derived figure is a lower
+bound: the true one lies in `[derived, derived + 100/quorum_pc)`, and that width is published as
+`eligible_voting_power_bound`. A Proposal under a set this table does not name gets no bar and no
+verdict: `eligible_voting_power` `"0"`, `framework` null, and `approved` / `mas_met` null on both
+legs.
+
+**Sides by label, never by position.** A Temperature Check's sides are For (index 1) and Against
+(index 0). A Proposal has sides only when it is single choice and its option labels — trimmed,
+ASCII case-insensitive — are exactly `Approve`, `Reject` and optionally `Abstain`, each once, in
+any order; any other label set, and any multi-select Proposal, publishes `approve_weight`,
+`reject_weight`, `mas_met` and `approved` as null. Abstain counts toward quorum (it is in
+`total_weight`) and toward `abstain_weight`, and stays outside the decisive share. Both legs apply
+the whole bar: the quorum, the at-or-above threshold, MAS, and the distinct-voter floor.
 
 `weight_delta_by_source` is **OTER-rule weight minus official-rule weight, per source**, over the
 accounts whose weight entered the OTER total. Every leg is zero on a source where the DAO's
@@ -385,42 +446,43 @@ version shipped here, is all of them. The values are signed: positive where the 
 position the allowlist does not, negative the other way round. There is no `liquid` leg, because a
 balance is not a listed source and both rules count it at par.
 
-`mirror_doc_version` **1 is refused, not checked.** Those documents state the official rule as
-liquid XRD only. Recomputing one under the rule above would compare a number against a rule that
-did not produce it, and every difference reported after that would say more about the verifier
-than about the document.
+**Only `mirror_doc_version` 3 is checked; 1 and 2 are refused, not checked.** Version 1 documents
+state the official rule as liquid XRD only. Version 2 documents were read from the pre-1.0.0 flat
+official entry, with positional sides and a bar without MAS. Recomputing either under the rule
+above would compare a number against a rule that did not produce it, and every difference
+reported after that would say more about the verifier than about the document.
 
 **Its presence is the switch.** There is no `--mirror` flag: `radix-tally-verify` runs exactly as
-above, and a document carrying `ballot_source` gets five checks instead of one:
+above, and a document carrying `ballot_source` gets six checks instead of one:
 
 | Check | What it does | Where a mismatch is reported |
 |---|---|---|
-| **(a)** the ballots | Re-reads the official component's own state — `temperature_checks` / `proposals` key-value store → the entry named by `official_id` → its `voters` key-value store, all at `ballot_state_version` — and compares every account's selection, plus the entry's own `quorum` / `approval_threshold` / `start` / `deadline` / `vote_count` / `revote_count`, against what `ballot_source` claims | `ballot_source.(a) …` |
-| **(b)** the official rule | Checks `allowlist_version` / `allowlist_hash` against this package's own copy of the list, then recomputes the app's policy — direct XRD, every active validator's LSUs, LSULP and the allowlisted positions — at `snapshot_state_version` with the same weight engine check (c) uses, handed the allowlist as its register; summed per option, gated by `official_quorum` / `official_approval_threshold`, and compared against the claimed totals and their `totals_by_source` split | `ballot_source.(b) official_rule. …` |
+| **(a)** the ballots | Re-reads the official component's own state — `temperature_checks` / `proposals` key-value store → the entry named by `official_id` → its `voters` key-value store, all at `ballot_state_version` — and compares every account's selection, plus the entry's own metadata, against what `ballot_source` claims: `quorum` / `approval_threshold` of its parameter-set leg, the set's `{id, label, version, variant}`, `start` / `deadline` / `vote_count` / `revote_count`, a Temperature Check's `snapshot`, `outcome` and `continuation`, a Proposal's `max_selections` | `ballot_source.(a) …` |
+| **(b)** the official rule | Checks `allowlist_version` / `allowlist_hash` against this package's own copy of the list, then recomputes the app's policy — direct XRD, every validator's LSUs, LSULP and the allowlisted positions — at `snapshot_state_version` with the same weight engine check (c) uses, handed the allowlist as its register; summed per option, and decided under the same bar and the same label sides as the OTER rule (quorum, threshold, MAS, voter floor); compared against the claimed totals, verdict and `totals_by_source` split | `ballot_source.(b) official_rule. …` |
 | **(c)** the OTER rule | The ordinary v20 pipeline above, completely unchanged — this is why a mirror document's top-level fields are checked exactly as a Poll's would be | the usual unprefixed field names (`totals[…]`, `votes[…].weight`, `approved`, …) |
-| **(d)** the window | How many re-read ballots landed after the deadline or before the vote opened, both bounds resolved from `official_start` / `official_deadline` via the Gateway's timestamp selector — see below | `ballot_source.(d) ballots_outside_window` |
+| **(d)** the window | How many re-read ballots landed after the deadline or before the snapshot, both bounds resolved from `official_snapshot` / `official_deadline` via the Gateway's timestamp selector — see below | `ballot_source.(d) ballots_outside_window` |
 | **(e)** the weight delta | The per-source gap between the two rules — OTER-rule weight minus official-rule weight over the same participating accounts, both sides from the same weight engine over the same account set. Zero wherever the register and the allowlist agree; signed where they do not | `ballot_source.(e) weight_delta_by_source. …` |
+| **(f)** the framework bar | Re-derives eligible voting power, MAS and the voter floor from the RE-READ parameter-set id and quorum (never the document's) and compares them against the top-level `eligible_voting_power`, `min_affirmative_support` and `min_unique_voters`, and the framework row against `ballot_source.framework` | `ballot_source.(f) …` |
 
 Every mismatch is still an ordinary `Difference` in the same `figures` outcome the rest of this
-tool uses — there is no separate mirror outcome kind. The prefix names which of (a)–(e) is wrong
+tool uses — there is no separate mirror outcome kind. The prefix names which of (a)–(f) is wrong
 without inventing a second vocabulary for it.
 
 Because both legs now go through one weight engine and differ only in the register handed to it,
 a difference between them is attributable: it is the two lists disagreeing, not two
 implementations of arithmetic disagreeing.
 
-**One thing this tool had to decide rather than derive, in `src/mirror.ts`:** the official rule is
-checked only as a binary Approve/Reject bar. Every mirror document observed on the official
-component is one — a Temperature Check always is, and the plan does not specify a multi-select
-official bar for a Proposal — so check (b) refuses (MALFORMED) rather than guess at one.
+A Proposal without decision sides — another label set, or a multi-select — is not refused: its
+totals, `total_weight` and `quorum_met` are recomputed and compared on both legs as usual, and its
+verdict fields are checked to be null.
 
 **`ballots_outside_window` is ported from the reference engine, not approximated.** Both window
-bounds are resolved from `official_start` / `official_deadline` — timestamps — via the Gateway's
+bounds are resolved from `official_snapshot` / `official_deadline` — timestamps — via the Gateway's
 timestamp selector (`POST /state/entity/details` with `at_ledger_state: { timestamp }`, XRD as the
 anchor address since any well-known entity works and its data is never read): the SAME call the
 engine's own state-version lookup makes, and the SAME comparison its outside-window count makes
 — a ballot's own
-`last_updated_at_state_version` outside `[start_state_version, deadline_state_version]` counts as
+`last_updated_at_state_version` outside `[snapshot_state_version, deadline_state_version]` counts as
 late. `deadline_state_version` is unbounded while `official_deadline` is still in the future (the
 engine's own unbounded `deadline_state_version` sentinel): there is no ledger state after a future
 deadline to
@@ -436,7 +498,10 @@ instead of reused, matching the engine exactly.
 
 ### Worked example: mainnet Temperature Check #5
 
-Live-fetched against `https://mainnet.radixdlt.com`, 2026-08-29 (state version ≈556,518,680):
+Live-fetched against `https://mainnet.radixdlt.com`, 2026-08-29 (state version ≈556,518,680).
+This is the Consultation App's earlier `Governance` component, whose entries carry `quorum` and
+`approval_threshold` flat on the entry; a `Governance` 1.0.0 entry carries them on its own
+parameter-set leg instead, alongside its `snapshot`, `outcome` and `continuation`:
 
 ```
 component_rdx1czn9hrgd30x742k6jw2e6psj9jlkqvu2cj4hcry60p7f38hxd3k3xt   Governance
