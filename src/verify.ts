@@ -17,7 +17,7 @@ import { WeightRuleError } from "./concentrated.ts";
 import { Dec } from "./decimal.ts";
 import { DocumentError, parseTallyDocument } from "./document.ts";
 import type { PinnedWeightSet, TallyDocument } from "./document.ts";
-import { decisionSides } from "./framework.ts";
+import type { Sides } from "./framework.ts";
 import { GatewayError } from "./gateway.ts";
 import type { GatewayClient } from "./gateway.ts";
 import { checkRegisterScope, verifyMirrorBallots } from "./mirror.ts";
@@ -219,10 +219,13 @@ export async function verifyTallyDocument(
     // weighed under — here and in (e) — so that a register address is never sent to a gateway on
     // another network, whatever the document claims.
     let oterSources = doc.weightSources;
+    let mirrorSides: Sides | null = null;
     if (doc.isMirror) {
       const scoped = checkRegisterScope(doc, options.weightSet ?? null);
       oterSources = scoped.applied;
-      mirrorDifferences = [...scoped.differences, ...(await verifyMirrorBallots(doc, gw, xrdResource, oterSources))];
+      const mirror = await verifyMirrorBallots(doc, gw, xrdResource, oterSources);
+      mirrorSides = mirror.sides;
+      mirrorDifferences = [...scoped.differences, ...mirror.differences];
     }
 
     // Every account whose weight any published figure depends on: the ballots, plus (v18) every
@@ -273,10 +276,11 @@ export async function verifyTallyDocument(
         delegationInput: doc.delegationInput,
         tallyDocVersion: doc.tallyDocVersion,
         // A mirror's `min_affirmative_support` and `min_unique_voters` are the document's own;
-        // check (f) has already compared both against the re-read parameter set.
+        // check (f) has already compared both against the re-read parameter set. Its sides come
+        // from the ON-CHAIN option labels (check (a) compares the document's against them).
         mirror: doc.ballotSource
           ? {
-              sides: decisionSides(doc.ballotSource.kind, doc.options, doc.ballotSource.officialMaxSelections),
+              sides: mirrorSides,
               framework: doc.ballotSource.framework !== null,
             }
           : undefined,

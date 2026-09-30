@@ -10,7 +10,8 @@
  * `approval_threshold` of its parameter-set leg, plus the governance framework's Minimum
  * Affirmative Support and distinct-voter floor for that set (`src/framework.ts`). Both decide by
  * LABEL: a Temperature Check's sides are For and Against, a Proposal's are its Approve, Reject and
- * optional Abstain options wherever they sit, and a Proposal with any other label set, or a
+ * optional Abstain options wherever they sit — the labels the entry carries ON CHAIN, never the
+ * document's — and a Proposal with any other label set, or a
  * multi-select one, decides nothing. Abstain counts toward quorum and stays outside the decisive
  * share. The top-level document fields (`votes`, `totals`,
  * `total_weight`, `quorum`, `approval_threshold_pc`, `approved`, …) already carry the OTER-rule
@@ -30,7 +31,9 @@
  *       what `ballot_source` claims: the `quorum` / `approval_threshold` of its parameter-set
  *       leg, the set's `{id, label, version, variant}`, `start` / `deadline` / `vote_count` /
  *       `revote_count`, a Temperature Check's `snapshot`, recorded `outcome` and `continuation`,
- *       and a Proposal's `max_selections`. The entry is read in the Governance 1.0.0 shape, by
+ *       and a Proposal's `max_selections` and its `vote_options` labels in id order against the
+ *       document's `options` — the labels both legs take their sides from, since ballots match
+ *       by index. The entry is read in the Governance 1.0.0 shape, by
  *       field name; a shape it does not describe is refused, naming the path. The weight
  *       snapshot's anchor is checked too: `snapshot_state_version` must be the state version the
  *       Gateway's timestamp selector resolves the entry's snapshot Instant to (its `start` on a
@@ -197,6 +200,37 @@ export interface OfficialEntry {
   continuation: { kind: string; id: number } | null;
   /** A Proposal's `max_selections`; `null` when single choice, and on every Temperature Check. */
   maxSelections: number | null;
+  /** A Proposal's `vote_options` labels, verbatim, in `ProposalVoteOptionId` order — the order
+   * its ballots index; `null` on a Temperature Check, whose sides are fixed. */
+  voteOptions: string[] | null;
+}
+
+/**
+ * A Proposal's `vote_options`: `Array<Tuple ProposalVoteOption { id: ProposalVoteOptionId(U32),
+ * label: String }>`, returned as the labels in id order. The ids must be exactly `0..n-1`, since
+ * a ballot's selection is an id and the published `options` are indexed by it; any other shape is
+ * refused, naming the path.
+ */
+function readVoteOptions(value: unknown, field: string): string[] {
+  const f = tupleField(value, "vote_options");
+  if (f === null) throw new WeightRuleError(`${field} has no readable vote_options field`);
+  const elements = asArray(f["elements"]);
+  const labels: (string | undefined)[] = new Array(elements.length);
+  elements.forEach((element, i) => {
+    const at = `${field} vote_options[${i}]`;
+    const idNode = tupleField(element, "id");
+    if (idNode === null) throw new WeightRuleError(`${at} has no readable id field`);
+    const idRaw = asString(idNode["value"]) ?? asString(asObject(asArray(idNode["fields"])[0])["value"]);
+    if (idRaw === null || !/^\d+$/.test(idRaw)) throw new WeightRuleError(`${at}.id does not parse as U32`);
+    const id = Number(idRaw);
+    if (id >= elements.length || labels[id] !== undefined) {
+      throw new WeightRuleError(`${at}.id ${id} is not a distinct id in 0..${elements.length - 1}`);
+    }
+    const label = tupleFieldString(element, "label");
+    if (label === null) throw new WeightRuleError(`${at} has no readable label field`);
+    labels[id] = label;
+  });
+  return labels as string[];
 }
 
 /** An Enum-shaped `programmatic_json` field: its `variant_name` and the node itself. */
@@ -373,6 +407,7 @@ export async function readOfficialEntry(
       outcome,
       continuation,
       maxSelections: null,
+      voteOptions: null,
     };
   }
 
@@ -383,6 +418,7 @@ export async function readOfficialEntry(
     outcome: null,
     continuation: null,
     maxSelections: maxInner === null ? null : scalarInt(maxInner, `${field} max_selections`),
+    voteOptions: readVoteOptions(value, field),
   };
 }
 
@@ -696,21 +732,30 @@ export function checkRegisterScope(
   return { applied, differences };
 }
 
+/** What the mirror checks found, and the decision sides both legs take. */
+export interface MirrorChecks {
+  differences: Difference[];
+  /** The sides derived from the ON-CHAIN option labels (a Temperature Check's fixed For/Against),
+   * never from the document's; `null` when the vote decides nothing. */
+  sides: Sides | null;
+}
+
 /**
  * Every mirror-specific check (a), (b), (d), (e), (f) — everything `ballot_source` adds on top of the
- * ordinary v20 pipeline that `src/verify.ts` already runs unchanged for (c). `[]` on an ordinary
- * document (`doc.isMirror` false); the caller is expected to skip calling this in that case, but
- * it is harmless either way. `oterSources` is the register (g) derived — the one (e) weighs the
- * OTER leg under; it defaults to the document's own.
+ * ordinary v20 pipeline that `src/verify.ts` already runs unchanged for (c). No differences and no
+ * sides on an ordinary document (`doc.isMirror` false); the caller is expected to skip calling
+ * this in that case, but it is harmless either way. `oterSources` is the register (g) derived —
+ * the one (e) weighs the OTER leg under; it defaults to the document's own. The returned `sides`
+ * are the ones (c) decides the OTER leg by.
  */
 export async function verifyMirrorBallots(
   doc: TallyDocument,
   gw: GatewayClient,
   xrdResource: string,
   oterSources: WeightSources = doc.weightSources,
-): Promise<Difference[]> {
+): Promise<MirrorChecks> {
   const bs: BallotSource | null = doc.ballotSource;
-  if (bs === null) return [];
+  if (bs === null) return { differences: [], sides: null };
   const diffs: Difference[] = [];
   const check = (field: string, document: string, recomputed: string): void => {
     if (document !== recomputed) diffs.push({ field, document, recomputed });
@@ -737,6 +782,13 @@ export async function verifyMirrorBallots(
   check("ballot_source.(a) official_outcome", canonicalize(bs.officialOutcome as unknown as Json), canonicalize(entry.outcome as unknown as Json));
   check("ballot_source.(a) official_continuation", canonicalize(bs.officialContinuation as unknown as Json), canonicalize(entry.continuation as unknown as Json));
   check("ballot_source.(a) official_max_selections", String(bs.officialMaxSelections), String(entry.maxSelections));
+  // A Proposal's option labels, verbatim and in id order. The sides are derived from the entry's
+  // labels, never the document's: ballots match by index, so a document with Approve and Reject
+  // swapped would otherwise re-derive its own inverted verdict and agree with itself.
+  if (entry.voteOptions !== null) {
+    check("ballot_source.(a) options", canonicalize(doc.options), canonicalize(entry.voteOptions));
+  }
+  const sides = decisionSides(bs.kind, entry.voteOptions ?? [], bs.officialMaxSelections);
 
   // (f) the framework bar, derived from the RE-READ set and quorum, never from the document's.
   const framework = frameworkFor(bs.kind, entry.parameterSet.id, entry.quorum);
@@ -802,7 +854,7 @@ export async function verifyMirrorBallots(
     doc.totals.length,
     bs.officialQuorum,
     bs.officialApprovalThreshold.mul(Dec.fromInt(100)),
-    framework === null ? null : decisionSides(bs.kind, doc.options, bs.officialMaxSelections),
+    framework === null ? null : sides,
     framework?.mas ?? Dec.ZERO,
     framework?.minUniqueVoters ?? 0,
   );
@@ -890,5 +942,5 @@ export async function verifyMirrorBallots(
   );
   check("ballot_source.(e) weight_delta_by_source.shape_pools", bs.weightDeltaBySource.shapePools.toString(), delta.shapePools.toString());
 
-  return diffs;
+  return { differences: diffs, sides };
 }

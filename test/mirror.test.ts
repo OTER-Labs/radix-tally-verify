@@ -947,12 +947,31 @@ test("the OTER leg still strikes the barred ballot: counting it there is a figur
 const GP_REGISTER_KVS = "internal_keyvaluestore_rdx1kvgp0000000000000000000000000000000010";
 const GP_OPTIONS = ["Reject", "Abstain", "Approve"];
 
+/** `vote_options` as the Gateway renders it: `ProposalVoteOption { id: ProposalVoteOptionId(U32),
+ * label }` tuples. `order` lists the ids in array order (default: id order). */
+function voteOptionsField(labels: string[], order: number[] = labels.map((_, i) => i)): unknown {
+  return {
+    field_name: "vote_options",
+    kind: "Array",
+    element_kind: "Tuple",
+    elements: order.map((id) => ({
+      kind: "Tuple",
+      type_name: "ProposalVoteOption",
+      fields: [
+        { field_name: "id", kind: "Tuple", type_name: "ProposalVoteOptionId", fields: [{ kind: "U32", value: String(id) }] },
+        { field_name: "label", kind: "String", value: labels[id] },
+      ],
+    })),
+  };
+}
+
 /** The Proposal entry in the Governance 1.0.0 shape: its own `Standard` parameter-set snapshot,
- * read on the `proposal` leg; no `snapshot`, `outcome` or `continuation`; `max_selections` None. */
-function gpRegisterData(setId: string): unknown {
+ * read on the `proposal` leg; no `snapshot`, `outcome` or `continuation`; `max_selections` None;
+ * `vote_options` labelled `GP_OPTIONS` unless `voteOptions` says otherwise. */
+function gpRegisterData(setId: string, voteOptions: unknown = voteOptionsField(GP_OPTIONS)): unknown {
   const s = (field_name: string, value: string) => ({ field_name, value });
   const fields = [
-    { field_name: "vote_options", kind: "Array", elements: [] },
+    voteOptions,
     { field_name: "max_selections", kind: "Enum", variant_name: "None", fields: [] },
     s("temperature_check_id", "5"),
     s("voters", VOTERS_KVS),
@@ -998,7 +1017,7 @@ function gpVoterEntry(account: string, option: number, lastUpdatedAtStateVersion
   };
 }
 
-function gpGateway(setId: string): FakeGateway {
+function gpGateway(setId: string, voteOptions?: unknown): FakeGateway {
   return new FakeGateway()
     .onDetails({
       items: [
@@ -1023,7 +1042,7 @@ function gpGateway(setId: string): FakeGateway {
     .onTimestampDetails(timestampDetails(SNAPSHOT_SV)) // (d) official_snapshot (= start)
     .onTimestampDetails(timestampDetails(BALLOT_SV)) // (d) official_deadline
     .onKvsKeys(GP_REGISTER_KVS, { items: [{ key: { programmatic_json: { value: "7" } } }], next_cursor: null })
-    .onKvsData(GP_REGISTER_KVS, gpRegisterData(setId))
+    .onKvsData(GP_REGISTER_KVS, gpRegisterData(setId, voteOptions))
     .onKvsKeys(VOTERS_KVS, votersKeys())
     .onKvsData(VOTERS_KVS, {
       entries: [
@@ -1112,6 +1131,59 @@ test("the dao-treasury voter floor fails quorum on both legs, and is a MATCH", a
   const doc = gpDoc("dao-treasury");
   const out = await verifyTallyDocument(doc, hash(doc), gpGateway("dao-treasury"), XRD);
   assert.deepEqual(out, { kind: "match", hashChecked: true });
+});
+
+test("on-chain option labels listed out of id order are read in id order, and the document is a MATCH", async () => {
+  // The same labels, the array rendered [Approve (id 2), Reject (id 0), Abstain (id 1)]: the
+  // ballots index by id, so the labels are placed by id, not by array position.
+  const doc = gpDoc("default");
+  const out = await verifyTallyDocument(doc, hash(doc), gpGateway("default", voteOptionsField(GP_OPTIONS, [2, 0, 1])), XRD);
+  assert.deepEqual(out, { kind: "match", hashChecked: true });
+});
+
+test("a document with Approve and Reject swapped differs on (a) options and is judged by the on-chain labels", async () => {
+  // Chain: ["Reject", "Abstain", "Approve"]. The document swaps the two decisive labels and
+  // publishes the verdict those swapped labels give — approve 30 (option 0), reject 100 — which
+  // is internally consistent, and the ballots still match by index. Deriving the sides from the
+  // document's labels would re-derive that same inverted verdict and agree with it.
+  const doc = gpDoc("default");
+  doc["options"] = ["Approve", "Abstain", "Reject"];
+  doc["approve_weight"] = "30";
+  doc["reject_weight"] = "100";
+  doc["approved"] = false;
+  const bs = doc["ballot_source"] as Record<string, unknown>;
+  bs["official_rule"] = { ...(bs["official_rule"] as Record<string, unknown>), approved: false };
+  const out = await verifyTallyDocument(doc, null, gpGateway("default"), XRD);
+  assert.equal(out.kind, "figures");
+  if (out.kind !== "figures") return;
+  const byField = new Map(out.differences.map((d) => [d.field, d]));
+  assert.deepEqual(
+    [...byField.keys()].sort(),
+    [
+      "approve_weight",
+      "approved",
+      "ballot_source.(a) options",
+      "ballot_source.(b) official_rule.approved",
+      "reject_weight",
+    ],
+  );
+  assert.deepEqual(byField.get("ballot_source.(a) options"), {
+    field: "ballot_source.(a) options",
+    document: '["Approve","Abstain","Reject"]',
+    recomputed: '["Reject","Abstain","Approve"]',
+  });
+  assert.equal(byField.get("approve_weight")?.recomputed, "100");
+  assert.equal(byField.get("reject_weight")?.recomputed, "30");
+  assert.equal(byField.get("approved")?.recomputed, "true");
+  assert.equal(byField.get("ballot_source.(b) official_rule.approved")?.recomputed, "true");
+});
+
+test("a proposal entry whose vote_options ids are not 0..n-1 is MALFORMED, naming the path", async () => {
+  const doc = gpDoc("default");
+  const dup = voteOptionsField(GP_OPTIONS, [0, 1, 1]);
+  const out = await verifyTallyDocument(doc, null, gpGateway("default", dup), XRD);
+  assert.equal(out.kind, "malformed");
+  assert.ok(out.kind === "malformed" && out.reason.includes("vote_options[2].id"), JSON.stringify(out));
 });
 
 test("a proposal document that decides by position is a figures disagreement", async () => {

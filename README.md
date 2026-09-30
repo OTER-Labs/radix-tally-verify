@@ -468,7 +468,12 @@ legs.
 **Sides by label, never by position.** A Temperature Check's sides are For (index 1) and Against
 (index 0). A Proposal has sides only when it is single choice and its option labels — trimmed,
 ASCII case-insensitive — are exactly `Approve`, `Reject` and optionally `Abstain`, each once, in
-any order. "Trimmed" strips ASCII whitespace from both ends and nothing else: U+0020 space, U+0009
+any order. The labels are the ones the Proposal carries on chain: its `vote_options`, read from
+the entry at `official_entry_state_version` and placed by their `ProposalVoteOptionId`, the index
+every ballot's selection names. The document's `options` must equal them verbatim (check (a),
+reported as `ballot_source.(a) options`), and the sides never come from the document: ballots
+match by index, so a document with Approve and Reject swapped would otherwise re-derive its own
+inverted verdict and agree with itself. "Trimmed" strips ASCII whitespace from both ends and nothing else: U+0020 space, U+0009
 tab, U+000A line feed, U+000C form feed and U+000D carriage return. Common library trims strip
 wider Unicode sets, and different languages strip different ones, so a label wrapped in any other
 character (U+FEFF, U+0085, U+000B, U+00A0, …) is not one of the three words and the Proposal decides
@@ -495,7 +500,7 @@ above, and a document carrying `ballot_source` gets seven checks instead of one:
 
 | Check | What it does | Where a mismatch is reported |
 |---|---|---|
-| **(a)** the ballots | Re-reads the official component's own state — `temperature_checks` / `proposals` key-value store → the entry named by `official_id`, at `official_entry_state_version` → its `voters` key-value store, at `ballot_state_version` — and compares every account's selection, plus the entry's own metadata, against what `ballot_source` claims: `quorum` / `approval_threshold` of its parameter-set leg, the set's `{id, label, version, variant}`, `start` / `deadline` / `vote_count` / `revote_count`, a Temperature Check's `snapshot`, `outcome` and `continuation`, a Proposal's `max_selections`. It also checks the weight snapshot's anchor: `snapshot_state_version` must equal the state version the Gateway's timestamp selector resolves the entry's snapshot Instant to (a Proposal's `start`) — see below | `ballot_source.(a) …`; the anchor as `ballot_source.(a) snapshot_state_version` |
+| **(a)** the ballots | Re-reads the official component's own state — `temperature_checks` / `proposals` key-value store → the entry named by `official_id`, at `official_entry_state_version` → its `voters` key-value store, at `ballot_state_version` — and compares every account's selection, plus the entry's own metadata, against what `ballot_source` claims: `quorum` / `approval_threshold` of its parameter-set leg, the set's `{id, label, version, variant}`, `start` / `deadline` / `vote_count` / `revote_count`, a Temperature Check's `snapshot`, `outcome` and `continuation`, a Proposal's `max_selections`, and a Proposal's on-chain option labels against the document's `options`. It also checks the weight snapshot's anchor: `snapshot_state_version` must equal the state version the Gateway's timestamp selector resolves the entry's snapshot Instant to (a Proposal's `start`) — see below | `ballot_source.(a) …`; the labels as `ballot_source.(a) options`; the anchor as `ballot_source.(a) snapshot_state_version` |
 | **(b)** the official rule | Checks `allowlist_version` / `allowlist_hash` against this package's own copy of the list, then recomputes the app's policy — direct XRD, every validator's LSUs, LSULP and the allowlisted positions — at `snapshot_state_version` with the same weight engine check (c) uses, handed the allowlist as its register; summed per option over every ballot, barred accounts included, and decided under the same bar and the same label sides as the OTER rule (quorum, threshold, MAS, voter floor); compared against the claimed totals, verdict and `totals_by_source` split | `ballot_source.(b) official_rule. …` |
 | **(c)** the OTER rule | The ordinary v20 pipeline above, completely unchanged — this is why a mirror document's top-level fields are checked exactly as a Poll's would be | the usual unprefixed field names (`totals[…]`, `votes[…].weight`, `approved`, …) |
 | **(d)** the window | How many re-read ballots landed before the vote's own start or after its deadline, both bounds resolved from `official_start` / `official_deadline` via the Gateway's timestamp selector — see below | `ballot_source.(d) ballots_outside_window` |
