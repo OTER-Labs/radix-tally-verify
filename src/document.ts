@@ -117,9 +117,10 @@ export interface OfficialTotalsBySource {
 
 /**
  * The document's claim about what the OFFICIAL rule found — the Consultation App's own policy
- * (direct XRD, every active validator's LSUs, LSULP, and the positions on its static DEX
- * allowlist), recomputed and compared against the same absolute `official_quorum` /
- * `official_approval_threshold`.
+ * (direct XRD, every validator's LSUs, LSULP, and the positions on its static DEX allowlist),
+ * recomputed and compared under the same bar as the top-level result: the official vote's own
+ * absolute `official_quorum` / `official_approval_threshold`, plus the framework's MAS and
+ * distinct-voter floor.
  *
  * `allowlistVersion` and `allowlistHash` name the list it was weighed under. They are what make
  * that leg checkable at all: the verifier ships its own copy of the list, recomputes the hash,
@@ -133,7 +134,9 @@ export interface OfficialRuleClaim {
   totalsBySource: OfficialTotalsBySource;
   totalWeight: Dec;
   quorumMet: boolean;
-  approved: boolean;
+  /** `null` when the official vote has no decision sides (see `decisionSides`) or its parameter
+   * set is one the framework table does not name. */
+  approved: boolean | null;
 }
 
 /**
@@ -181,6 +184,48 @@ export interface BallotSource {
   ballotsOutsideWindow: number;
   officialRule: OfficialRuleClaim;
   weightDeltaBySource: WeightDeltaBySource;
+  /** `official_snapshot`: the Instant the weight snapshot anchors to — the vote's own `snapshot`
+   * field on a Temperature Check, its `start` on a Proposal (which carries no snapshot). */
+  officialSnapshot: number;
+  /** `official_parameter_set`: `{id, label, version, variant}` of the vote's own snapshot of its
+   * parameter set; `variant` is `Standard` or `MajorityJudgment`. */
+  officialParameterSet: OfficialParameterSet | null;
+  /** `official_outcome`: a Temperature Check's recorded `{result, recorded_at}`, `result` being
+   * `Passed` or `Failed`; `null` until one is recorded, and on every Proposal. */
+  officialOutcome: { result: string; recordedAt: number } | null;
+  /** `official_continuation`: what a Temperature Check was elevated to, `{kind, id}` with `kind`
+   * `proposal` or `majority_judgment_election`; `null` when it has not been. */
+  officialContinuation: { kind: string; id: number } | null;
+  /** `official_max_selections`: a Proposal's `max_selections`; `null` for a single-choice
+   * Proposal and for every Temperature Check. */
+  officialMaxSelections: number | null;
+  /** `framework`: the governance framework row the bar was taken from, or `null` for a
+   * parameter set the table does not name (which then decides nothing). */
+  framework: FrameworkClaim | null;
+}
+
+/** `ballot_source.official_parameter_set`. */
+export interface OfficialParameterSet {
+  id: string;
+  label: string;
+  version: number;
+  variant: string;
+}
+
+/**
+ * `ballot_source.framework`: the Parameters Registry row the document says its bar came from —
+ * `source` (the framework revision and sections), `quorum_pc`, `mas_pc`, `min_unique_voters`,
+ * `eligible_voting_power_derivation` (the derivation in words) and `eligible_voting_power_bound`
+ * (`100 / quorum_pc`, how far below the true figure the derived one can lie). A claim, recomputed
+ * from the re-read parameter set by check (f).
+ */
+export interface FrameworkClaim {
+  source: string;
+  quorumPc: Dec;
+  masPc: Dec;
+  minUniqueVoters: number;
+  derivation: string;
+  bound: Dec;
 }
 
 /** The document could not be read as a tally document at all. Maps to exit 4, distinct from
@@ -341,19 +386,19 @@ function reqObject(raw: unknown): Record<string, unknown> {
   return raw as Record<string, unknown>;
 }
 
-function reqString(doc: Record<string, unknown>, field: string): string {
+function reqString(doc: Record<string, unknown>, field: string, path: string = field): string {
   const v = asString(doc[field]);
-  if (v === null) fail(field, "is missing or not a string");
+  if (v === null) fail(path, "is missing or not a string");
   return v;
 }
 
-function reqDec(doc: Record<string, unknown>, field: string): Dec {
+function reqDec(doc: Record<string, unknown>, field: string, path: string = field): Dec {
   const s = asString(doc[field]);
-  if (s === null) fail(field, "is missing or not a Decimal string");
+  if (s === null) fail(path, "is missing or not a Decimal string");
   try {
     return Dec.parse(s);
   } catch (e) {
-    fail(field, `is not a canonical Decimal: ${e instanceof Error ? e.message : String(e)}`);
+    fail(path, `is not a canonical Decimal: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
@@ -378,10 +423,10 @@ function optInt(doc: Record<string, unknown>, field: string): number | null {
   return v;
 }
 
-function reqInt(doc: Record<string, unknown>, field: string): number {
+function reqInt(doc: Record<string, unknown>, field: string, path: string = field): number {
   const v = doc[field];
   if (typeof v !== "number" || !Number.isSafeInteger(v)) {
-    fail(field, "is missing or not a safe integer");
+    fail(path, "is missing or not a safe integer");
   }
   return v as number;
 }
@@ -736,8 +781,11 @@ const MIRROR_KINDS: readonly MirrorKind[] = ["temperature_check", "proposal"];
  * another tally rule is refused on-ledger: recomputing it under version 2's rule would compare a
  * number against a rule that did not produce it, and every difference reported after that would
  * be an artefact of the verifier, not evidence about the document.
+ *
+ * Version 2 is refused too: its official entry was the pre-1.0.0 flat shape, its sides positional
+ * and its bar without MAS, so a v2 document cannot be recomputed under v3's rule.
  */
-export const SUPPORTED_MIRROR_DOC_VERSION = 2;
+export const SUPPORTED_MIRROR_DOC_VERSION = 3;
 
 function parseOfficialRuleClaim(raw: unknown): OfficialRuleClaim {
   const o = asObject(raw);
@@ -772,7 +820,7 @@ function parseOfficialRuleClaim(raw: unknown): OfficialRuleClaim {
     },
     totalWeight: reqDec(o, "total_weight"),
     quorumMet: reqBool(o, "quorum_met"),
-    approved: reqBool(o, "approved"),
+    approved: optBool(o, "approved"),
   };
 }
 
@@ -788,14 +836,93 @@ function parseWeightDeltaBySource(raw: unknown): WeightDeltaBySource {
 }
 
 /**
+ * A v3 `ballot_source` key whose value may be `null` but whose PRESENCE is required: the
+ * reference engine writes every one of them on every v3 document, so a missing key is a document
+ * it cannot have produced — never read as a null.
+ */
+function nullableKey(o: Record<string, unknown>, field: string, path: string): unknown {
+  if (!Object.hasOwn(o, field) || o[field] === undefined) fail(path, "is missing (it is written on every v3 document, null or not)");
+  return o[field];
+}
+
+function nullableObject(o: Record<string, unknown>, field: string, path: string): Record<string, unknown> | null {
+  const v = nullableKey(o, field, path);
+  if (v === null) return null;
+  if (typeof v !== "object" || Array.isArray(v)) fail(path, "is neither null nor an object");
+  return v as Record<string, unknown>;
+}
+
+function nullableInt(o: Record<string, unknown>, field: string, path: string): number | null {
+  const v = nullableKey(o, field, path);
+  if (v === null) return null;
+  if (typeof v !== "number" || !Number.isSafeInteger(v)) fail(path, "is neither null nor a safe integer");
+  return v;
+}
+
+function parseOfficialParameterSet(o: Record<string, unknown>): OfficialParameterSet | null {
+  const path = "ballot_source.official_parameter_set";
+  const p = nullableObject(o, "official_parameter_set", path);
+  if (p === null) return null;
+  return {
+    id: reqString(p, "id", `${path}.id`),
+    label: reqString(p, "label", `${path}.label`),
+    version: reqInt(p, "version", `${path}.version`),
+    variant: reqString(p, "variant", `${path}.variant`),
+  };
+}
+
+function parseOfficialOutcome(o: Record<string, unknown>): { result: string; recordedAt: number } | null {
+  const path = "ballot_source.official_outcome";
+  const p = nullableObject(o, "official_outcome", path);
+  if (p === null) return null;
+  return {
+    result: reqString(p, "result", `${path}.result`),
+    recordedAt: reqInt(p, "recorded_at", `${path}.recorded_at`),
+  };
+}
+
+function parseOfficialContinuation(o: Record<string, unknown>): { kind: string; id: number } | null {
+  const path = "ballot_source.official_continuation";
+  const p = nullableObject(o, "official_continuation", path);
+  if (p === null) return null;
+  return {
+    kind: reqString(p, "kind", `${path}.kind`),
+    id: reqInt(p, "id", `${path}.id`),
+  };
+}
+
+function parseFrameworkClaim(o: Record<string, unknown>): FrameworkClaim | null {
+  const path = "ballot_source.framework";
+  const p = nullableObject(o, "framework", path);
+  if (p === null) return null;
+  return {
+    source: reqString(p, "source", `${path}.source`),
+    quorumPc: reqDec(p, "quorum_pc", `${path}.quorum_pc`),
+    masPc: reqDec(p, "mas_pc", `${path}.mas_pc`),
+    minUniqueVoters: reqInt(p, "min_unique_voters", `${path}.min_unique_voters`),
+    derivation: reqString(p, "eligible_voting_power_derivation", `${path}.eligible_voting_power_derivation`),
+    bound: reqDec(p, "eligible_voting_power_bound", `${path}.eligible_voting_power_bound`),
+  };
+}
+
+/**
  * The `ballot_source` block (§3): absent is `null`, exactly like every other additive leg in
  * this file — a document written before mirror tallies existed, or an ordinary Poll/Binding/
  * Election document, verifies exactly as it always did.
+ *
+ * A Majority Judgment round's mirror is refused by name: this verifier checks the Temperature
+ * Check and Proposal mirrors only.
  */
 function parseBallotSource(raw: unknown): BallotSource | null {
   if (raw === null || raw === undefined) return null;
   const o = asObject(raw);
   const kind = asString(o["kind"]);
+  if (kind === "majority_judgment_election" || kind === "majority_judgment_election_rerun") {
+    fail(
+      "ballot_source.kind",
+      `is ${kind}: this verifier does not implement Majority Judgment mirror verification`,
+    );
+  }
   if (kind === null || !(MIRROR_KINDS as readonly string[]).includes(kind)) {
     fail("ballot_source.kind", `is missing or not one of ${JSON.stringify(MIRROR_KINDS)}`);
   }
@@ -805,7 +932,8 @@ function parseBallotSource(raw: unknown): BallotSource | null {
       "ballot_source.mirror_doc_version",
       `is ${mirrorDocVersion}; this verifier implements ${SUPPORTED_MIRROR_DOC_VERSION}. Version 1 ` +
         `documents state the official rule as liquid XRD only, which is not the rule the ` +
-        `Consultation App applies, so their official leg cannot be recomputed here`,
+        `Consultation App applies, and version 2 documents read the pre-1.0.0 flat official ` +
+        `entry with positional sides and no MAS, so neither can be recomputed under this rule`,
     );
   }
   return {
@@ -825,6 +953,12 @@ function parseBallotSource(raw: unknown): BallotSource | null {
     ballotsOutsideWindow: reqInt(o, "ballots_outside_window"),
     officialRule: parseOfficialRuleClaim(o["official_rule"]),
     weightDeltaBySource: parseWeightDeltaBySource(o["weight_delta_by_source"]),
+    officialSnapshot: reqInt(o, "official_snapshot", "ballot_source.official_snapshot"),
+    officialParameterSet: parseOfficialParameterSet(o),
+    officialOutcome: parseOfficialOutcome(o),
+    officialContinuation: parseOfficialContinuation(o),
+    officialMaxSelections: nullableInt(o, "official_max_selections", "ballot_source.official_max_selections"),
+    framework: parseFrameworkClaim(o),
   };
 }
 
