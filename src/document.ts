@@ -204,6 +204,12 @@ export interface BallotSource {
   officialRevoteCount: number;
   ballotCount: number;
   ballotStateVersion: number;
+  /** `official_entry_state_version`: the state version at which the official entry was read —
+   * the entry's own `last_updated_at_state_version`. Check (a) re-reads the entry (its metadata,
+   * outcome and continuation) there, while the `voters` store is re-read at `ballot_state_version`:
+   * a Temperature Check records its outcome and continuation after its deadline, so after its
+   * last ballot, and the entry as it stood at the last ballot carries neither. */
+  officialEntryStateVersion: number;
   ballotsOutsideWindow: number;
   officialRule: OfficialRuleClaim;
   weightDeltaBySource: WeightDeltaBySource;
@@ -992,6 +998,7 @@ function parseBallotSource(raw: unknown): BallotSource | null {
     officialRevoteCount: reqInt(o, "official_revote_count"),
     ballotCount: reqInt(o, "ballot_count"),
     ballotStateVersion: reqInt(o, "ballot_state_version"),
+    officialEntryStateVersion: reqInt(o, "official_entry_state_version", "ballot_source.official_entry_state_version"),
     ballotsOutsideWindow: reqInt(o, "ballots_outside_window"),
     officialRule: parseOfficialRuleClaim(o["official_rule"]),
     weightDeltaBySource: parseWeightDeltaBySource(o["weight_delta_by_source"]),
@@ -1023,7 +1030,8 @@ function parseRegisterScope(o: Record<string, unknown>): RegisterScope {
  * The `--weight-set` file: `{"network": "mainnet" | "stokenet", "weight_set_version": N,
  * "weight_sources": {…}}`, the register in the same serialized shape a tally document carries.
  * Every address the register names must be on the declared network — the set is a registry's,
- * and a registry's entries live on its own ledger.
+ * and a registry's entries live on its own ledger. All three keys are required; a file without
+ * `weight_sources` is refused rather than read as the default register.
  */
 export function parsePinnedWeightSet(input: unknown): PinnedWeightSet {
   const setFail = (field: string, why: string): never => {
@@ -1036,6 +1044,11 @@ export function parsePinnedWeightSet(input: unknown): PinnedWeightSet {
   const version = o["weight_set_version"];
   if (typeof version !== "number" || !Number.isSafeInteger(version) || version < 0) {
     setFail("weight_set_version", "is missing or not a non-negative integer");
+  }
+  // Required: absent would parse as the default register, and a set file that says nothing about
+  // its register is not the registry's set.
+  if (!Object.hasOwn(o, "weight_sources") || o["weight_sources"] === undefined || o["weight_sources"] === null) {
+    setFail("weight_sources", "is missing");
   }
   let sources: WeightSources;
   try {

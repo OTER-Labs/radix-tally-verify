@@ -48,6 +48,9 @@ const ACC_REVOTER = "account_rdx1revoter0000000000000000000000000000000000000000
 const OFFICIAL_START = 1754000000;
 const OFFICIAL_DEADLINE = 1754604800;
 const BALLOT_SV = SNAPSHOT_SV + 50;
+/** The state version the official entry was last written at, and read at: after the last ballot,
+ * as a Temperature Check's is once its outcome is recorded. */
+const ENTRY_SV = BALLOT_SV + 25;
 
 /** A mirror tally document over the fixture Temperature Check: liquid-only For, staked For,
  * Against revoter.
@@ -108,6 +111,7 @@ function mirrorDoc(over: Record<string, unknown> = {}, ballotSourceOver: Record<
       official_revote_count: 1,
       ballot_count: 3,
       ballot_state_version: BALLOT_SV,
+      official_entry_state_version: ENTRY_SV,
       ballots_outside_window: 0,
       official_rule: {
         rule: OFFICIAL_RULE_TEXT,
@@ -216,7 +220,17 @@ function tcRegisterKeys(): unknown {
  * `temperature_check` leg of its own `Standard` parameter-set snapshot, plus its own `snapshot`,
  * and no outcome or continuation recorded yet. */
 function tcRegisterData(
-  over: { setId?: string; quorum?: string; threshold?: string; deadline?: string; snapshot?: string } = {},
+  over: {
+    setId?: string;
+    quorum?: string;
+    threshold?: string;
+    deadline?: string;
+    snapshot?: string;
+    /** A recorded outcome: `Passed` / `Failed` at `recordedAt`. */
+    outcome?: { result: "Passed" | "Failed"; recordedAt: number };
+    /** A recorded continuation into official Proposal `proposalId`. */
+    continuationProposalId?: number;
+  } = {},
 ): unknown {
   const s = (field_name: string, value: string) => ({ field_name, value });
   const fields = [
@@ -244,8 +258,22 @@ function tcRegisterData(
     s("deadline", over.deadline ?? String(OFFICIAL_DEADLINE)),
     s("vote_count", "4"),
     s("revote_count", "1"),
-    { field_name: "outcome", kind: "Enum", variant_name: "None", fields: [] },
-    { field_name: "continuation", kind: "Enum", variant_name: "None", fields: [] },
+    over.outcome === undefined
+      ? { field_name: "outcome", kind: "Enum", variant_name: "None", fields: [] }
+      : {
+          field_name: "outcome",
+          kind: "Enum",
+          variant_name: "Some",
+          fields: [{ kind: "Enum", variant_name: over.outcome.result, fields: [s("recorded_at", String(over.outcome.recordedAt))] }],
+        },
+    over.continuationProposalId === undefined
+      ? { field_name: "continuation", kind: "Enum", variant_name: "None", fields: [] }
+      : {
+          field_name: "continuation",
+          kind: "Enum",
+          variant_name: "Some",
+          fields: [{ kind: "Enum", variant_name: "Proposal", fields: [{ kind: "U64", value: String(over.continuationProposalId) }] }],
+        },
   ];
   return { entries: [{ value: { programmatic_json: { fields } } }] };
 }
@@ -304,6 +332,9 @@ function timestampDetails(stateVersion: number): unknown {
 function mirrorGateway(overrides: {
   componentDetails?: unknown;
   tcRegisterData?: unknown;
+  /** The Temperature Check entry as the ledger held it from each state version on — answered by
+   * the version a read asks for. Replaces `tcRegisterData` when given. */
+  tcRegisterDataAt?: Array<[number, unknown]>;
   votersData?: unknown;
   startSv?: number;
   deadlineSv?: number | null;
@@ -338,9 +369,13 @@ function mirrorGateway(overrides: {
       gw.onTimestampDetails(timestampDetails(deadlineSv)); // (d) official_deadline, window closed
     }
   }
+  gw.onKvsKeys(TC_REGISTER_KVS, tcRegisterKeys());
+  if (overrides.tcRegisterDataAt !== undefined) {
+    for (const [sv, data] of overrides.tcRegisterDataAt) gw.onKvsDataAt(TC_REGISTER_KVS, sv, data);
+  } else {
+    gw.onKvsData(TC_REGISTER_KVS, overrides.tcRegisterData ?? tcRegisterData());
+  }
   return gw
-    .onKvsKeys(TC_REGISTER_KVS, tcRegisterKeys())
-    .onKvsData(TC_REGISTER_KVS, overrides.tcRegisterData ?? tcRegisterData())
     .onKvsKeys(VOTERS_KVS, votersKeys())
     .onKvsData(VOTERS_KVS, overrides.votersData ?? votersData());
 }
@@ -638,6 +673,119 @@ test("(d) the window opens at the vote's own start, not at an earlier weight sna
   if (outcomeEarly.kind !== "figures") return;
   assert.deepEqual(outcomeEarly.differences, [
     { field: "ballot_source.(d) ballots_outside_window", document: "0", recomputed: "1" },
+  ]);
+});
+
+// ---------------------------------------------------------------------------------------------
+// The entry is re-read at official_entry_state_version, the ballots at ballot_state_version. A
+// Temperature Check records its outcome, and any continuation, after its deadline — so after its
+// last ballot. Here the ledger holds the entry without either from the last ballot (BALLOT_SV) on,
+// and with both from ENTRY_SV on; the fake gateway answers the entry by the version asked for.
+
+const OUTCOME_RECORDED_AT = OFFICIAL_DEADLINE + 3_600;
+
+function settledEntryAt(): Array<[number, unknown]> {
+  return [
+    [BALLOT_SV, tcRegisterData()],
+    [ENTRY_SV, tcRegisterData({ outcome: { result: "Passed", recordedAt: OUTCOME_RECORDED_AT }, continuationProposalId: 6 })],
+  ];
+}
+
+function settledMirrorDoc(entryStateVersion: number): Record<string, unknown> {
+  return mirrorDoc(
+    {},
+    {
+      official_entry_state_version: entryStateVersion,
+      official_outcome: { result: "Passed", recorded_at: OUTCOME_RECORDED_AT },
+      official_continuation: { kind: "proposal", id: 6 },
+    },
+  );
+}
+
+test("(a) a settled Temperature Check's outcome is read at official_entry_state_version, and is a MATCH", async () => {
+  const doc = settledMirrorDoc(ENTRY_SV);
+  const gw = mirrorGateway({ tcRegisterDataAt: settledEntryAt() });
+  const outcome = await verifyTallyDocument(doc, hash(doc), gw, XRD);
+  assert.deepEqual(outcome, { kind: "match", hashChecked: true });
+  // The entry at the entry's version, the voters at the ballots'.
+  assert.ok(gw.calls.includes(`kvs-data:${TC_REGISTER_KVS}@${ENTRY_SV}`), gw.calls.join("\n"));
+  assert.ok(gw.calls.includes(`kvs-data:${VOTERS_KVS}@${BALLOT_SV}`), gw.calls.join("\n"));
+});
+
+test("(a) the same document naming an entry version before the outcome differs on the outcome", async () => {
+  const doc = settledMirrorDoc(BALLOT_SV);
+  const outcome = await verifyTallyDocument(doc, null, mirrorGateway({ tcRegisterDataAt: settledEntryAt() }), XRD);
+  assert.equal(outcome.kind, "figures");
+  if (outcome.kind !== "figures") return;
+  assert.deepEqual(outcome.differences, [
+    {
+      field: "ballot_source.(a) official_outcome",
+      document: `{"recordedAt":${OUTCOME_RECORDED_AT},"result":"Passed"}`,
+      recomputed: "null",
+    },
+    { field: "ballot_source.(a) official_continuation", document: '{"id":6,"kind":"proposal"}', recomputed: "null" },
+  ]);
+});
+
+test("(a) an official_entry_state_version before the entry existed is refused by name", async () => {
+  const doc = settledMirrorDoc(SNAPSHOT_SV);
+  const outcome = await verifyTallyDocument(doc, null, mirrorGateway({ tcRegisterDataAt: settledEntryAt() }), XRD);
+  assert.equal(outcome.kind, "malformed", JSON.stringify(outcome));
+  assert.ok(
+    outcome.kind === "malformed" && outcome.reason.includes(`entry 5 of ${COMPONENT} has no value at sv ${SNAPSHOT_SV}`),
+    JSON.stringify(outcome),
+  );
+});
+
+test("a v3 document without an integer official_entry_state_version is MALFORMED naming the key", async () => {
+  for (const value of [undefined, null, "559737684", 1.5]) {
+    const doc = mirrorDoc();
+    const bs = doc["ballot_source"] as Record<string, unknown>;
+    if (value === undefined) delete bs["official_entry_state_version"];
+    else bs["official_entry_state_version"] = value;
+    const out = await verifyTallyDocument(doc, null, mirrorGateway(), XRD);
+    assert.equal(out.kind, "malformed", JSON.stringify(value));
+    assert.ok(
+      out.kind === "malformed" && out.reason.includes("ballot_source.official_entry_state_version"),
+      JSON.stringify(out),
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// The weight snapshot's anchor: snapshot_state_version is the state version at the entry's own
+// snapshot Instant (a Proposal's start), resolved by the same timestamp selector as (d).
+
+test("(a) a snapshot_state_version that is not the state version at official_snapshot differs by name", async () => {
+  // start == snapshot here, and the selector resolves that instant to SNAPSHOT_SV - 7, not the
+  // SNAPSHOT_SV the document was weighed at. No ballot moves across the window bound.
+  const doc = mirrorDoc();
+  const outcome = await verifyTallyDocument(doc, null, mirrorGateway({ startSv: SNAPSHOT_SV - 7 }), XRD);
+  assert.equal(outcome.kind, "figures");
+  if (outcome.kind !== "figures") return;
+  assert.deepEqual(outcome.differences, [
+    { field: "ballot_source.(a) snapshot_state_version", document: String(SNAPSHOT_SV), recomputed: String(SNAPSHOT_SV - 7) },
+  ]);
+});
+
+test("(a) a Temperature Check weighed at its start instead of its own snapshot differs on snapshot_state_version", async () => {
+  const snapshot = OFFICIAL_START - 86_400;
+  const timestampSv = {
+    [snapshot]: SNAPSHOT_SV,
+    [OFFICIAL_START]: SNAPSHOT_SV + 5, // before every ballot, so (d) is unaffected
+    [OFFICIAL_DEADLINE]: BALLOT_SV,
+  };
+  const doc = mirrorDoc({ snapshot_state_version: SNAPSHOT_SV + 5 }, { official_snapshot: snapshot });
+  const outcome = await verifyTallyDocument(
+    doc,
+    null,
+    mirrorGateway({ tcRegisterData: tcRegisterData({ snapshot: String(snapshot) }), timestampSv }),
+    XRD,
+  );
+  assert.equal(outcome.kind, "figures");
+  if (outcome.kind !== "figures") return;
+  assert.deepEqual(outcome.differences, [
+    { field: "ballot_source.(a) snapshot_state_version", document: String(SNAPSHOT_SV + 5), recomputed: String(SNAPSHOT_SV) },
   ]);
 });
 
@@ -1134,6 +1282,16 @@ test("(g) a v3 document without oter_register_scope, or with another value, is M
   const outOther = await verifyTallyDocument(other, null, mirrorGateway(), XRD);
   assert.equal(outOther.kind, "malformed");
   assert.ok(outOther.kind === "malformed" && outOther.reason.includes("ballot_source.oter_register_scope"));
+});
+
+test("(g) a supplied set without weight_sources is refused rather than read as the default register", async () => {
+  const { parsePinnedWeightSet, DocumentError } = await import("../src/document.ts");
+  for (const set of [{ network: "stokenet", weight_set_version: 7 }, { network: "stokenet", weight_set_version: 7, weight_sources: null }]) {
+    assert.throws(
+      () => parsePinnedWeightSet(set),
+      (e: unknown) => e instanceof DocumentError && e.message.includes("weight_sources"),
+    );
+  }
 });
 
 test("(g) a supplied set naming an address off its own network is refused", async () => {

@@ -22,13 +22,19 @@
  *       is carried inside the hash and never independently re-derived (see the README's "What is
  *       not recomputed"). A mirror document's ballots ARE re-derivable — that is the whole point
  *       — by walking the official component's own state: `temperature_checks` / `proposals` KVS
- *       → the entry named by `official_id` → its `voters` KVS, at `ballot_state_version`. This
- *       re-read is compared against `doc.votes` account by account, and the entry's own
- *       metadata against what `ballot_source` claims: the `quorum` / `approval_threshold` of its
- *       parameter-set leg, the set's `{id, label, version, variant}`, `start` / `deadline` /
- *       `vote_count` / `revote_count`, a Temperature Check's `snapshot`, recorded `outcome` and
- *       `continuation`, and a Proposal's `max_selections`. The entry is read in the Governance
- *       1.0.0 shape, by field name; a shape it does not describe is refused, naming the path.
+ *       → the entry named by `official_id`, at `official_entry_state_version` → its `voters`
+ *       KVS, at `ballot_state_version`. The two versions differ because a Temperature Check
+ *       records its outcome and continuation after its deadline, so after its last ballot: the
+ *       entry as it stood at `ballot_state_version` carries neither. The ballot re-read is
+ *       compared against `doc.votes` account by account, and the entry's own metadata against
+ *       what `ballot_source` claims: the `quorum` / `approval_threshold` of its parameter-set
+ *       leg, the set's `{id, label, version, variant}`, `start` / `deadline` / `vote_count` /
+ *       `revote_count`, a Temperature Check's `snapshot`, recorded `outcome` and `continuation`,
+ *       and a Proposal's `max_selections`. The entry is read in the Governance 1.0.0 shape, by
+ *       field name; a shape it does not describe is refused, naming the path. The weight
+ *       snapshot's anchor is checked too: `snapshot_state_version` must be the state version the
+ *       Gateway's timestamp selector resolves the entry's snapshot Instant to (its `start` on a
+ *       Proposal) — the same selector (d) uses.
  *   (b) **the official rule** — the app's own policy, recomputed with the SAME weight engine the
  *       OTER rule uses but handed the ALLOWLIST as its register (`src/allowlist.ts`), summed per
  *       option over the same ballots, gated by the same absolute `official_quorum` /
@@ -167,7 +173,7 @@ async function pageKvsKeys(
   return keys;
 }
 
-/** One official Temperature Check / Proposal entry, re-read at `ballot_state_version`. */
+/** One official Temperature Check / Proposal entry, re-read at `official_entry_state_version`. */
 export interface OfficialEntry {
   blueprint: string;
   votersKvsAddress: string;
@@ -710,8 +716,11 @@ export async function verifyMirrorBallots(
     if (document !== recomputed) diffs.push({ field, document, recomputed });
   };
 
-  // (a) component state -> the register -> the entry -> its own published parameters.
-  const entry = await readOfficialEntry(gw, bs.component, bs.kind, bs.officialId, bs.ballotStateVersion);
+  // (a) component state -> the register -> the entry -> its own published parameters, all at
+  // the state version the entry was read at. Not at `ballot_state_version`: a Temperature Check's
+  // outcome and continuation are recorded after its deadline, so after its last ballot, and the
+  // entry as it stood then carries neither.
+  const entry = await readOfficialEntry(gw, bs.component, bs.kind, bs.officialId, bs.officialEntryStateVersion);
   check("ballot_source.(a) blueprint", bs.blueprint, entry.blueprint);
   check("ballot_source.(a) official_quorum", bs.officialQuorum.toString(), entry.quorum.toString());
   check(
@@ -741,7 +750,8 @@ export async function verifyMirrorBallots(
     canonicalize(framework === null ? null : ({ source: FRAMEWORK_SOURCE, quorum_pc: framework.quorumPc.toString(), mas_pc: framework.masPc.toString(), min_unique_voters: framework.minUniqueVoters, derivation: ELIGIBLE_DERIVATION, bound: framework.bound.toString() } as unknown as Json)),
   );
 
-  // (a) the ballots themselves — the register's `voters` KVS, latest per account.
+  // (a) the ballots themselves — the register's `voters` KVS, latest per account, at
+  // `ballot_state_version`.
   const ballots = await readOfficialBallots(gw, entry.votersKvsAddress, bs.kind, bs.ballotStateVersion);
   check("ballot_source.(a) ballot_count", String(bs.ballotCount), String(ballots.length));
 
@@ -830,6 +840,17 @@ export async function verifyMirrorBallots(
   // window — and is always resolved; the upper bound is unbounded while `official_deadline` has
   // not yet passed.
   const lowerBoundSv = await resolveStateVersionAtTimestamp(gw, xrdResource, bs.officialStart);
+
+  // (a) the weight snapshot's anchor: `snapshot_state_version` must be the state version at the
+  // RE-READ snapshot Instant (a Proposal's `start`), through the same selector. When the snapshot
+  // is the start, the lookup above already answered it.
+  const snapshotInstant = entry.snapshot ?? entry.start;
+  const snapshotSv =
+    snapshotInstant === bs.officialStart
+      ? lowerBoundSv
+      : await resolveStateVersionAtTimestamp(gw, xrdResource, snapshotInstant);
+  check("ballot_source.(a) snapshot_state_version", String(doc.snapshotStateVersion), String(snapshotSv));
+
   const nowSeconds = Math.floor(Date.now() / 1000);
   const upperBoundSv =
     bs.officialDeadline > nowSeconds
