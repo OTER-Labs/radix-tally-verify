@@ -392,6 +392,7 @@ the OTER-rule result exactly as an ordinary Poll would, plus one extra block:
   "official_max_selections": null,
   "official_vote_count": 51, "official_revote_count": 3,
   "ballot_count": 48, "ballot_state_version": 542970896, "ballots_outside_window": 0,
+  "official_entry_state_version": 543104118,
   "official_rule": { "rule": "The Radix DAO Consultation App's own rule at snapshot_state_version: …",
                       "allowlist_version": "2026-09-06", "allowlist_hash": "bfadafb5…",
                       "totals": ["…", "…"], "total_weight": "…",
@@ -416,6 +417,16 @@ it was elevated to (`proposal` or `majority_judgment_election`); both are null o
 `official_max_selections` is a Proposal's `max_selections` (null when single choice, and on every
 Temperature Check). All six v3 keys are written on every v3 document; a missing one is MALFORMED,
 never read as null.
+
+`official_entry_state_version` is the state version at which the official entry was read: the
+entry's own `last_updated_at_state_version`. It is an integer on every v3 document, of every kind;
+a missing or non-integer value is MALFORMED, naming the key. The document carries two read points
+because the entry and its ballots change at different times. A Temperature Check records its
+`outcome`, and any `continuation`, after its deadline, so after its last ballot, and the entry as it
+stood at `ballot_state_version` carries neither. Check (a) therefore reads the entry at
+`official_entry_state_version` and the `voters` store at `ballot_state_version`. The entry read at
+`official_entry_state_version` must exist and must be the vote the document names; nothing else is
+required of how the two versions are ordered.
 
 `oter_register_scope` says how much of the weight-source register the OTER-rule leg applied, and
 is always present: exactly `"full"` or `"network_independent"`, and anything else, absence
@@ -457,7 +468,11 @@ legs.
 **Sides by label, never by position.** A Temperature Check's sides are For (index 1) and Against
 (index 0). A Proposal has sides only when it is single choice and its option labels — trimmed,
 ASCII case-insensitive — are exactly `Approve`, `Reject` and optionally `Abstain`, each once, in
-any order; any other label set, and any multi-select Proposal, publishes `approve_weight`,
+any order. "Trimmed" strips ASCII whitespace from both ends and nothing else: U+0020 space, U+0009
+tab, U+000A line feed, U+000C form feed and U+000D carriage return. Common library trims strip
+wider Unicode sets, and different languages strip different ones, so a label wrapped in any other
+character (U+FEFF, U+0085, U+000B, U+00A0, …) is not one of the three words and the Proposal decides
+nothing; any other label set, and any multi-select Proposal, publishes `approve_weight`,
 `reject_weight`, `mas_met` and `approved` as null. Abstain counts toward quorum (it is in
 `total_weight`) and toward `abstain_weight`, and stays outside the decisive share. Both legs apply
 the whole bar: the quorum, the at-or-above threshold, MAS, and the distinct-voter floor.
@@ -480,7 +495,7 @@ above, and a document carrying `ballot_source` gets seven checks instead of one:
 
 | Check | What it does | Where a mismatch is reported |
 |---|---|---|
-| **(a)** the ballots | Re-reads the official component's own state — `temperature_checks` / `proposals` key-value store → the entry named by `official_id` → its `voters` key-value store, all at `ballot_state_version` — and compares every account's selection, plus the entry's own metadata, against what `ballot_source` claims: `quorum` / `approval_threshold` of its parameter-set leg, the set's `{id, label, version, variant}`, `start` / `deadline` / `vote_count` / `revote_count`, a Temperature Check's `snapshot`, `outcome` and `continuation`, a Proposal's `max_selections` | `ballot_source.(a) …` |
+| **(a)** the ballots | Re-reads the official component's own state — `temperature_checks` / `proposals` key-value store → the entry named by `official_id`, at `official_entry_state_version` → its `voters` key-value store, at `ballot_state_version` — and compares every account's selection, plus the entry's own metadata, against what `ballot_source` claims: `quorum` / `approval_threshold` of its parameter-set leg, the set's `{id, label, version, variant}`, `start` / `deadline` / `vote_count` / `revote_count`, a Temperature Check's `snapshot`, `outcome` and `continuation`, a Proposal's `max_selections`. It also checks the weight snapshot's anchor: `snapshot_state_version` must equal the state version the Gateway's timestamp selector resolves the entry's snapshot Instant to (a Proposal's `start`) — see below | `ballot_source.(a) …`; the anchor as `ballot_source.(a) snapshot_state_version` |
 | **(b)** the official rule | Checks `allowlist_version` / `allowlist_hash` against this package's own copy of the list, then recomputes the app's policy — direct XRD, every validator's LSUs, LSULP and the allowlisted positions — at `snapshot_state_version` with the same weight engine check (c) uses, handed the allowlist as its register; summed per option over every ballot, barred accounts included, and decided under the same bar and the same label sides as the OTER rule (quorum, threshold, MAS, voter floor); compared against the claimed totals, verdict and `totals_by_source` split | `ballot_source.(b) official_rule. …` |
 | **(c)** the OTER rule | The ordinary v20 pipeline above, completely unchanged — this is why a mirror document's top-level fields are checked exactly as a Poll's would be | the usual unprefixed field names (`totals[…]`, `votes[…].weight`, `approved`, …) |
 | **(d)** the window | How many re-read ballots landed before the vote's own start or after its deadline, both bounds resolved from `official_start` / `official_deadline` via the Gateway's timestamp selector — see below | `ballot_source.(d) ballots_outside_window` |
@@ -516,6 +531,15 @@ The window opens at the vote's own `start`, for every kind — never at `officia
 snapshot fixes the weights and nothing else. For a Proposal and a first round the two are the same
 instant; a Majority Judgment rerun weighs at round one's snapshot but opens for ballots at its own
 start, so a ballot cast between the two lies outside its window.
+
+**The snapshot anchor is checked through the same selector.** Both legs are weighed at the
+top-level `snapshot_state_version`, so that number decides every weight in the document. Check (a)
+resolves the entry's own snapshot Instant (a Temperature Check's `snapshot`, a Proposal's `start`)
+to a state version with the timestamp selector above and requires `snapshot_state_version` to equal
+it. A document weighed at any other state version — at a Temperature Check's `start` instead of its
+`snapshot`, say — is internally consistent and would otherwise recompute cleanly; this check names
+it as `ballot_source.(a) snapshot_state_version`. When the snapshot Instant is the start, the
+window's lower-bound lookup answers both.
 
 An earlier version of this check bounded the window by `[snapshot_state_version,
 ballot_source.ballot_state_version]` instead — reusing two state-version anchors the document
@@ -594,8 +618,9 @@ names and the network of the registry that holds it:
   "weight_sources": { "native_pools": { "mode": "all" }, "lsulp": { … }, … } }
 ```
 
-`weight_sources` is in the shape a tally document carries. Every address it names must be on the
-declared network, or the file is refused.
+All three keys are required. `weight_sources` is in the shape a tally document carries; a file
+without it is refused rather than read as the default register. Every address it names must be on
+the declared network, or the file is refused.
 
 Exit codes are the contract:
 
