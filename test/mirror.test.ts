@@ -146,6 +146,8 @@ function mirrorDoc(over: Record<string, unknown> = {}, ballotSourceOver: Record<
         eligible_voting_power_derivation: ELIGIBLE_DERIVATION,
         eligible_voting_power_bound: "33.333333333333333333",
       },
+      // A stokenet component weighed on a stokenet stack: the register applies whole.
+      oter_register_scope: "full",
       ...ballotSourceOver,
     },
     ...over,
@@ -308,15 +310,20 @@ function mirrorGateway(overrides: {
   /** Unix seconds -> state version, answered by instant rather than in call order. When given,
    * `startSv` / `deadlineSv` are not queued. */
   timestampSv?: Record<number, number>;
+  /** The LSULP pair's details, read by the OTER-rule walks (e) and (c) when the register they
+   * apply names a pair. The official leg's stokenet allowlist names none. */
+  lsulpDetails?: unknown;
 } = {}): FakeGateway {
   const gw = new FakeGateway()
     .onDetails(overrides.componentDetails ?? componentDetails())
     .onDetails(accountsFungibles()) // (b) official-rule breakdown, under the ALLOWLIST register
     .onDetails(resourceInfo()) // (b) its held-resource info
-    .onDetails(accountsFungibles()) // (e) OTER-rule breakdown fungibles
-    .onDetails(resourceInfo()) // (e) weight-breakdown held-resource info
-    .onDetails(accountsFungibles()) // (c) the ordinary OTER-rule pipeline
-    .onDetails(resourceInfo()) // (c) the ordinary OTER-rule pipeline
+    .onDetails(accountsFungibles()); // (e) OTER-rule breakdown fungibles
+  if (overrides.lsulpDetails !== undefined) gw.onDetails(overrides.lsulpDetails); // (e) the LSULP rate
+  gw.onDetails(resourceInfo()) // (e) weight-breakdown held-resource info
+    .onDetails(accountsFungibles()); // (c) the ordinary OTER-rule pipeline
+  if (overrides.lsulpDetails !== undefined) gw.onDetails(overrides.lsulpDetails); // (c) the LSULP rate
+  gw.onDetails(resourceInfo()) // (c) the ordinary OTER-rule pipeline
     .onValidators(validatorsResponse())
     .onValidators(validatorsResponse())
     .onValidators(validatorsResponse());
@@ -969,4 +976,175 @@ test("a proposal document that decides by position is a figures disagreement", a
   assert.equal(out.kind, "figures");
   const fields = out.kind === "figures" ? out.differences.map((d) => d.field) : [];
   assert.ok(fields.includes("approve_weight") && fields.includes("approved"), JSON.stringify(fields));
+});
+
+// ---------------------------------------------------------------------------------------------
+// (g) the register scope. The fixture's official component is on stokenet. A registry on
+// stokenet makes the scope "full"; a registry on mainnet makes it "network_independent", and
+// then no leg that names an address may reach the stokenet gateway.
+
+const STOKENET_LSULP_POOL = "component_tdx_2_1lsulppool0000000000000000000000000000000000001";
+const STOKENET_LSULP = "resource_tdx_2_1lsulp0000000000000000000000000000000000000000002";
+const STOKENET_DELEGATION = "component_tdx_2_1delegation000000000000000000000000000000000003";
+const MAINNET_NATIVE_POOL = "pool_rdx1nativepool00000000000000000000000000000000000000000004";
+const MAINNET_LSULP_POOL = "component_rdx1lsulppool000000000000000000000000000000000000005";
+const MAINNET_LSULP = "resource_rdx1lsulp00000000000000000000000000000000000000000006";
+const MAINNET_PRECISION = "component_rdx1precision00000000000000000000000000000000000007";
+const MAINNET_SHAPE = "component_rdx1shape000000000000000000000000000000000000000008";
+const MAINNET_DELEGATION = "component_rdx1delegation0000000000000000000000000000000000009";
+const MAINNET_REGISTER_ADDRESSES = [
+  MAINNET_NATIVE_POOL,
+  MAINNET_LSULP_POOL,
+  MAINNET_LSULP,
+  MAINNET_PRECISION,
+  MAINNET_SHAPE,
+  MAINNET_DELEGATION,
+];
+
+/** The LSULP pair at the snapshot: rate 1. Nobody in the fixture holds LSULP, so naming the pair
+ * reads the rate and changes no weight. */
+function lsulpDetails(component: string, resource: string): unknown {
+  return {
+    items: [
+      { address: component, details: { state: { fields: [{ field_name: "dex_valuation_xrd", value: "1000" }] } } },
+      { address: resource, details: { total_supply: "1000" } },
+    ],
+  };
+}
+
+/** The gateway calls that named any of `addresses`. */
+function callsNaming(gw: FakeGateway, addresses: string[]): string[] {
+  return gw.calls.filter((c) => addresses.some((a) => c.includes(a)));
+}
+
+test("(g) scopedRegister: \"full\" drops delegation only; \"network_independent\" keeps discovery and nothing named", async () => {
+  const { scopedRegister } = await import("../src/mirror.ts");
+  const named = {
+    native_pools: { mode: "allowlist" as const, pools: [MAINNET_NATIVE_POOL] },
+    lsulp: { mode: "component" as const, component: MAINNET_LSULP_POOL, resource: MAINNET_LSULP },
+    precision_pools: { mode: "allowlist" as const, pools: [MAINNET_PRECISION] },
+    shape_pools: { mode: "allowlist" as const, pools: [MAINNET_SHAPE] },
+    delegation: { mode: "component" as const, component: MAINNET_DELEGATION },
+  };
+  const { delegation: _d, ...withoutDelegation } = named;
+  assert.deepEqual(scopedRegister(named, "full"), withoutDelegation);
+  // An allowlist turns off rather than widening into discovery.
+  assert.deepEqual(scopedRegister(named, "network_independent"), { native_pools: { mode: "off" } });
+  // Discovery names nothing, so it stays.
+  assert.deepEqual(
+    scopedRegister({ ...named, native_pools: { mode: "all" } }, "network_independent"),
+    { native_pools: { mode: "all" } },
+  );
+});
+
+test("(g) \"full\": a registry on the component's own network applies its whole register, delegation off, and is a MATCH", async () => {
+  const { parsePinnedWeightSet } = await import("../src/document.ts");
+  const weightSet = parsePinnedWeightSet({
+    network: "stokenet",
+    weight_set_version: 7,
+    weight_sources: {
+      native_pools: { mode: "all" },
+      lsulp: { mode: "component", component: STOKENET_LSULP_POOL, resource: STOKENET_LSULP },
+      delegation: { mode: "component", component: STOKENET_DELEGATION },
+    },
+  });
+  const doc = mirrorDoc({
+    weight_set_version: 7,
+    weight_sources: {
+      native_pools: { mode: "all" },
+      lsulp: { mode: "component", component: STOKENET_LSULP_POOL, resource: STOKENET_LSULP },
+    },
+  });
+  const gw = mirrorGateway({ lsulpDetails: lsulpDetails(STOKENET_LSULP_POOL, STOKENET_LSULP) });
+  const outcome = await verifyTallyDocument(doc, hash(doc), gw, XRD, { weightSet });
+  assert.deepEqual(outcome, { kind: "match", hashChecked: true });
+  // The whole register was applied: the pair was priced on the component's own network.
+  assert.equal(callsNaming(gw, [STOKENET_LSULP_POOL]).length, 2, gw.calls.join("\n"));
+  assert.deepEqual(callsNaming(gw, [STOKENET_DELEGATION]), []);
+});
+
+test("(g) \"network_independent\": a registry on another network applies no named leg, sends none of its addresses, and is a MATCH", async () => {
+  const { parsePinnedWeightSet } = await import("../src/document.ts");
+  const weightSet = parsePinnedWeightSet({
+    network: "mainnet",
+    weight_set_version: 7,
+    weight_sources: {
+      native_pools: { mode: "allowlist", pools: [MAINNET_NATIVE_POOL] },
+      lsulp: { mode: "component", component: MAINNET_LSULP_POOL, resource: MAINNET_LSULP },
+      precision_pools: { mode: "allowlist", pools: [MAINNET_PRECISION] },
+      shape_pools: { mode: "allowlist", pools: [MAINNET_SHAPE] },
+      delegation: { mode: "component", component: MAINNET_DELEGATION },
+    },
+  });
+  // `weight_set_version` names the full set; `weight_sources` is the scoped subset.
+  const doc = mirrorDoc(
+    { weight_set_version: 7, weight_sources: { native_pools: { mode: "off" } } },
+    { oter_register_scope: "network_independent" },
+  );
+  const gw = mirrorGateway();
+  const outcome = await verifyTallyDocument(doc, hash(doc), gw, XRD, { weightSet });
+  assert.deepEqual(outcome, { kind: "match", hashChecked: true });
+  assert.deepEqual(callsNaming(gw, MAINNET_REGISTER_ADDRESSES), []);
+});
+
+test("(g) a document claiming \"full\" across networks differs by name on oter_register_scope", async () => {
+  const { parsePinnedWeightSet } = await import("../src/document.ts");
+  const weightSet = parsePinnedWeightSet({
+    network: "mainnet",
+    weight_set_version: 7,
+    weight_sources: { native_pools: { mode: "all" } },
+  });
+  const doc = mirrorDoc({ weight_set_version: 7 }); // claims "full", carries { native_pools: all }
+  const outcome = await verifyTallyDocument(doc, null, mirrorGateway(), XRD, { weightSet });
+  assert.equal(outcome.kind, "figures");
+  if (outcome.kind !== "figures") return;
+  assert.deepEqual(outcome.differences, [
+    { field: "ballot_source.(g) oter_register_scope", document: "full", recomputed: "network_independent" },
+  ]);
+});
+
+test("(g) without a supplied set, a \"full\" document naming another network's pair differs by name and the pair is never sent", async () => {
+  const doc = mirrorDoc({
+    weight_sources: {
+      native_pools: { mode: "all" },
+      lsulp: { mode: "component", component: MAINNET_LSULP_POOL, resource: MAINNET_LSULP },
+    },
+  });
+  const gw = mirrorGateway();
+  const outcome = await verifyTallyDocument(doc, null, gw, XRD);
+  assert.equal(outcome.kind, "figures");
+  if (outcome.kind !== "figures") return;
+  assert.deepEqual(
+    outcome.differences.map((d) => d.field),
+    ["ballot_source.(g) oter_register_scope", "ballot_source.(g) weight_sources"],
+  );
+  assert.equal(outcome.differences[0]?.recomputed, "network_independent");
+  assert.equal(outcome.differences[1]?.recomputed, '{"native_pools":{"mode":"all"}}');
+  assert.deepEqual(callsNaming(gw, [MAINNET_LSULP_POOL, MAINNET_LSULP]), []);
+});
+
+test("(g) a v3 document without oter_register_scope, or with another value, is MALFORMED", async () => {
+  const missing = mirrorDoc();
+  delete (missing["ballot_source"] as Record<string, unknown>)["oter_register_scope"];
+  const outMissing = await verifyTallyDocument(missing, null, mirrorGateway(), XRD);
+  assert.equal(outMissing.kind, "malformed");
+  assert.ok(outMissing.kind === "malformed" && outMissing.reason.includes("ballot_source.oter_register_scope"));
+
+  const other = mirrorDoc({}, { oter_register_scope: "partial" });
+  const outOther = await verifyTallyDocument(other, null, mirrorGateway(), XRD);
+  assert.equal(outOther.kind, "malformed");
+  assert.ok(outOther.kind === "malformed" && outOther.reason.includes("ballot_source.oter_register_scope"));
+});
+
+test("(g) a supplied set naming an address off its own network is refused", async () => {
+  const { parsePinnedWeightSet, DocumentError } = await import("../src/document.ts");
+  assert.throws(
+    () =>
+      parsePinnedWeightSet({
+        network: "stokenet",
+        weight_set_version: 7,
+        weight_sources: { native_pools: { mode: "allowlist", pools: [MAINNET_NATIVE_POOL] } },
+      }),
+    (e: unknown) => e instanceof DocumentError && e.message.includes(MAINNET_NATIVE_POOL),
+  );
 });

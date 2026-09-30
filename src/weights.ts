@@ -168,6 +168,59 @@ export function concentratedPools(leg: ConcentratedPoolSources | undefined): str
   return leg !== undefined && leg.mode === "allowlist" ? leg.pools : [];
 }
 
+/**
+ * The network an address lives on, from its bech32 prefix: `mainnet` for `…_rdx1…`, `stokenet`
+ * for `…_tdx_2_1…`, and the raw network part for any other Radix network. `null` when the string
+ * does not look like a Radix address at all.
+ */
+export function networkOf(address: string): string | null {
+  const m = /^[a-z]+(?:_[a-z]+)*?_(rdx|sim|loc|tdx_[0-9a-f]+_)1/.exec(address);
+  if (m === null) return null;
+  const hrp = m[1] as string;
+  return hrp === "rdx" ? "mainnet" : hrp === "tdx_2_" ? "stokenet" : hrp;
+}
+
+/** Every address a register names: the legs a gateway on another network cannot answer. */
+export function registerAddresses(sources: WeightSources): string[] {
+  const out: string[] = [];
+  if (sources.native_pools.mode === "allowlist") out.push(...sources.native_pools.pools);
+  if (sources.lsulp !== undefined && sources.lsulp.mode === "component") {
+    out.push(sources.lsulp.component, sources.lsulp.resource);
+  }
+  out.push(...concentratedPools(sources.precision_pools), ...concentratedPools(sources.shape_pools));
+  if (sources.delegation !== undefined && sources.delegation.mode === "component") {
+    out.push(sources.delegation.component);
+  }
+  if (sources.fungible !== undefined) out.push(sources.fungible.resource);
+  if (sources.membership !== undefined) out.push(sources.membership.resource);
+  return out;
+}
+
+/**
+ * A register in the serialized shape a tally document carries it: an off leg is absent, except
+ * `native_pools`, which is always written (`{"mode":"off"}` when off). Two registers that mean the
+ * same thing serialize to the same JSON, whatever spelling either was read from.
+ */
+export function serializeWeightSources(sources: WeightSources): Record<string, unknown> {
+  const np = sources.native_pools;
+  const out: Record<string, unknown> = {
+    native_pools: np.mode === "allowlist" ? { mode: "allowlist", pools: [...np.pools] } : { mode: np.mode },
+  };
+  if (sources.lsulp !== undefined && sources.lsulp.mode === "component") {
+    out["lsulp"] = { mode: "component", component: sources.lsulp.component, resource: sources.lsulp.resource };
+  }
+  for (const leg of ["precision_pools", "shape_pools"] as const) {
+    const named = sources[leg];
+    if (named !== undefined && named.mode === "allowlist") out[leg] = { mode: "allowlist", pools: [...named.pools] };
+  }
+  if (sources.delegation !== undefined && sources.delegation.mode === "component") {
+    out["delegation"] = { mode: "component", component: sources.delegation.component };
+  }
+  if (sources.fungible !== undefined) out["fungible"] = { resource: sources.fungible.resource };
+  if (sources.membership !== undefined) out["membership"] = { resource: sources.membership.resource };
+  return out;
+}
+
 /** What a held fungible turns out to be once looked up at the snapshot. */
 export interface ResourceInfo {
   totalSupply: Dec;

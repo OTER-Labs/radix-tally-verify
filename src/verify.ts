@@ -16,11 +16,11 @@ import type { Json } from "./canonical.ts";
 import { WeightRuleError } from "./concentrated.ts";
 import { Dec } from "./decimal.ts";
 import { DocumentError, parseTallyDocument } from "./document.ts";
-import type { TallyDocument } from "./document.ts";
+import type { PinnedWeightSet, TallyDocument } from "./document.ts";
 import { decisionSides } from "./framework.ts";
 import { GatewayError } from "./gateway.ts";
 import type { GatewayClient } from "./gateway.ts";
-import { verifyMirrorBallots } from "./mirror.ts";
+import { checkRegisterScope, verifyMirrorBallots } from "./mirror.ts";
 import { deriveFigures } from "./verdict.ts";
 import type { DerivedFigures } from "./verdict.ts";
 import { assetSymbolFor, computeAccountWeights } from "./weights.ts";
@@ -179,11 +179,21 @@ export function compareFigures(doc: TallyDocument, derived: DerivedFigures): Dif
  * checked and the outcome says so — a figure match with an unchecked hash is not the same
  * claim as a full match.
  */
+export interface VerifyOptions {
+  /**
+   * The weight-source set the document's `weight_set_version` names, and its registry's network.
+   * Read only for a mirror document, by check (g); without it the document's own register stands
+   * in for the set.
+   */
+  weightSet?: PinnedWeightSet;
+}
+
 export async function verifyTallyDocument(
   input: unknown,
   expectedHash: string | null,
   gw: GatewayClient,
   xrdResource: string,
+  options: VerifyOptions = {},
 ): Promise<Outcome> {
   let doc: TallyDocument;
   let envelopeHash: string | null;
@@ -199,13 +209,20 @@ export async function verifyTallyDocument(
   let assetSymbolDifferences: Difference[] = [];
   let derived: DerivedFigures;
   try {
-    // Mirror documents (`ballot_source` present, `src/mirror.ts`) get four extra checks on top of
-    // the pipeline below, which runs unchanged for the fifth (the OTER-rule figures every mirror
+    // Mirror documents (`ballot_source` present, `src/mirror.ts`) get extra checks on top of
+    // the pipeline below, which runs unchanged for (c) (the OTER-rule figures every mirror
     // document already carries at top level, exactly as a Poll would). Run first, in the same
     // try/catch: a gateway or register problem here is exactly as UNKNOWN/MALFORMED as one in the
     // weight recomputation, and the two share the classification below rather than duplicate it.
+    //
+    // Check (g) comes first and touches no gateway: it decides the register the OTER leg is
+    // weighed under — here and in (e) — so that a register address is never sent to a gateway on
+    // another network, whatever the document claims.
+    let oterSources = doc.weightSources;
     if (doc.isMirror) {
-      mirrorDifferences = await verifyMirrorBallots(doc, gw, xrdResource);
+      const scoped = checkRegisterScope(doc, options.weightSet ?? null);
+      oterSources = scoped.applied;
+      mirrorDifferences = [...scoped.differences, ...(await verifyMirrorBallots(doc, gw, xrdResource, oterSources))];
     }
 
     // Every account whose weight any published figure depends on: the ballots, plus (v18) every
@@ -223,7 +240,7 @@ export async function verifyTallyDocument(
       gw,
       accounts,
       doc.snapshotStateVersion,
-      doc.weightSources,
+      oterSources,
       xrdResource,
     );
 

@@ -58,13 +58,21 @@
  *       `eligible_voting_power`, `min_affirmative_support` and `min_unique_voters`, and against
  *       the `ballot_source.framework` row the document names. A set the framework table does not
  *       name has no bar: `eligible_voting_power` `"0"`, `framework` null, and no verdict.
+ *   (g) **`oter_register_scope`** — which register the OTER-rule leg may apply on the official
+ *       component's network. The register is a registry's, and every entry it names is an
+ *       address on the registry's network. `"full"` exactly when the component is on that same
+ *       network; otherwise `"network_independent"`, under which every leg that names an address
+ *       is off (`scopedRegister`), so no register address is ever sent to the other network's
+ *       gateway. Delegation is off under both. The document's `weight_sources` must equal the
+ *       register so derived, and it is that DERIVED register — never the document's — that
+ *       (c) and (e) recompute the OTER leg under. See `checkRegisterScope`.
  *
  * Every mismatch here is reported through the same `Difference` shape `src/verify.ts` already
- * uses for the ordinary (c) figures, tagged `ballot_source.(a|b|d|e|f) …` so the letter that failed
- * is legible in the output without a second Outcome kind.
+ * uses for the ordinary (c) figures, tagged `ballot_source.(a|b|d|e|f|g) …` so the letter that
+ * failed is legible in the output without a second Outcome kind.
  */
 
-import type { BallotSource, MirrorKind, TallyDocument } from "./document.ts";
+import type { BallotSource, MirrorKind, PinnedWeightSet, RegisterScope, TallyDocument } from "./document.ts";
 import { canonicalize } from "./canonical.ts";
 import type { Json } from "./canonical.ts";
 import { Dec } from "./decimal.ts";
@@ -76,8 +84,8 @@ import type { GatewayClient } from "./gateway.ts";
 import { stateField } from "./concentrated.ts";
 import { WeightRuleError } from "./concentrated.ts";
 import { bindingApproved } from "./verdict.ts";
-import { computeAccountWeightBreakdown } from "./weights.ts";
-import type { WeightBreakdown } from "./weights.ts";
+import { computeAccountWeightBreakdown, networkOf, registerAddresses, serializeWeightSources } from "./weights.ts";
+import type { WeightBreakdown, WeightSources } from "./weights.ts";
 import type { Difference } from "./verify.ts";
 
 /** Keys per `/state/key-value-store/data` request; pages per `/state/key-value-store/keys` walk. */
@@ -596,15 +604,104 @@ function ballotsOutsideWindow(ballots: OfficialBallot[], lowerBoundSv: number, u
 }
 
 /**
+ * The register the OTER-rule leg applies under `scope`, from the full pinned set.
+ *
+ * Delegation is off under both scopes: a mirror resolves none. Under `"network_independent"`
+ * every leg that names an address goes off — `lsulp`, `precision_pools`, `shape_pools`, and a
+ * `native_pools` allowlist, which turns off rather than widening into discovery (discovery would
+ * count pools the register never admitted). `native_pools` in mode `all` stays: discovery names
+ * nothing, it follows the pool units the voter holds on the ledger being read. Direct XRD and
+ * every validator's stake units count under both, as always. The space legs (`fungible`,
+ * `membership`) name a resource and go off with the rest; a mirror lives in the Radix/XRD space
+ * and carries neither.
+ */
+export function scopedRegister(sources: WeightSources, scope: RegisterScope): WeightSources {
+  const { delegation: _delegation, ...rest } = sources;
+  if (scope === "full") return rest;
+  return {
+    native_pools: sources.native_pools.mode === "all" ? { mode: "all" } : { mode: "off" },
+  };
+}
+
+/**
+ * Check (g): the scope a mirror document claims, against the networks, and the register it
+ * carries, against the one that scope derives. Pure — no gateway call — and run before any
+ * weight walk, because its result is the register that walk is handed.
+ *
+ * The expected scope is `"full"` exactly when the official component's network equals the
+ * network of the registry whose weight-source set `weight_set_version` names. That set, and its
+ * registry's network, come from `pinned` when the caller supplies it. Without it, the document's
+ * own `weight_sources` stands in for the set: any address it names is a registry entry and says
+ * which network the registry is on, and a register that names nothing leaves the network unknown
+ * — the claimed scope then stands, and the derived register names nothing either way.
+ *
+ * Returns the derived register (under the EXPECTED scope wherever the networks are known), which
+ * names no address off the component's network, and the (g) differences.
+ */
+export function checkRegisterScope(
+  doc: TallyDocument,
+  pinned: PinnedWeightSet | null,
+): { applied: WeightSources; differences: Difference[] } {
+  const bs = doc.ballotSource;
+  if (bs === null) return { applied: doc.weightSources, differences: [] };
+  const differences: Difference[] = [];
+  const check = (field: string, document: string, recomputed: string): void => {
+    if (document !== recomputed) differences.push({ field, document, recomputed });
+  };
+
+  const componentNetwork = networkOf(bs.component);
+  if (componentNetwork === null) {
+    throw new WeightRuleError(`ballot_source.component ${bs.component} names no recognisable network`);
+  }
+
+  let registryNetwork: string | null;
+  let full: WeightSources;
+  if (pinned !== null) {
+    check("ballot_source.(g) weight_set_version", String(doc.weightSetVersion), String(pinned.version));
+    registryNetwork = pinned.network;
+    full = pinned.sources;
+  } else {
+    const networks = new Set<string>();
+    for (const address of registerAddresses(doc.weightSources)) {
+      const on = networkOf(address);
+      if (on === null) throw new WeightRuleError(`weight_sources names ${address}, which is on no recognisable network`);
+      networks.add(on);
+    }
+    if (networks.size > 1) {
+      throw new WeightRuleError(
+        `weight_sources names addresses on more than one network (${[...networks].sort().join(", ")}); ` +
+          `a register is one registry's, on one network`,
+      );
+    }
+    registryNetwork = networks.size === 1 ? ([...networks][0] as string) : null;
+    full = doc.weightSources;
+  }
+
+  const expected: RegisterScope | null =
+    registryNetwork === null ? null : registryNetwork === componentNetwork ? "full" : "network_independent";
+  if (expected !== null) check("ballot_source.(g) oter_register_scope", bs.oterRegisterScope, expected);
+
+  const applied = scopedRegister(full, expected ?? bs.oterRegisterScope);
+  check(
+    "ballot_source.(g) weight_sources",
+    canonicalize(serializeWeightSources(doc.weightSources) as unknown as Json),
+    canonicalize(serializeWeightSources(applied) as unknown as Json),
+  );
+  return { applied, differences };
+}
+
+/**
  * Every mirror-specific check (a), (b), (d), (e), (f) — everything `ballot_source` adds on top of the
  * ordinary v20 pipeline that `src/verify.ts` already runs unchanged for (c). `[]` on an ordinary
  * document (`doc.isMirror` false); the caller is expected to skip calling this in that case, but
- * it is harmless either way.
+ * it is harmless either way. `oterSources` is the register (g) derived — the one (e) weighs the
+ * OTER leg under; it defaults to the document's own.
  */
 export async function verifyMirrorBallots(
   doc: TallyDocument,
   gw: GatewayClient,
   xrdResource: string,
+  oterSources: WeightSources = doc.weightSources,
 ): Promise<Difference[]> {
   const bs: BallotSource | null = doc.ballotSource;
   if (bs === null) return [];
@@ -749,7 +846,7 @@ export async function verifyMirrorBallots(
     gw,
     accounts,
     doc.snapshotStateVersion,
-    doc.weightSources,
+    oterSources,
     xrdResource,
   );
   const counted = (account: string): boolean => !barred.has(account);

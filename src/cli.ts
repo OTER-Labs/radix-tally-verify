@@ -3,6 +3,11 @@
  * CLI: verify one tally document against Gateway state and the hash committed on-ledger.
  *
  *   radix-tally-verify <tally.json | -> [--gateway URL] [--tally-hash HEX] [--xrd-resource ADDR]
+ *                      [--weight-set FILE]
+ *
+ * `--weight-set` supplies the weight-source set a mirror document's `weight_set_version` names,
+ * as `{"network", "weight_set_version", "weight_sources"}`; check (g) then derives the register
+ * the document must carry from it. Ignored for a document that is not a mirror.
  *
  * Exit codes are the contract — a keeper or a cron job reads them, not the prose:
  *   0  MATCH        figures recompute exactly and (when a hash was supplied) the hash agrees
@@ -14,7 +19,8 @@
 
 import { readFileSync } from "node:fs";
 
-import { DocumentError, parseTallyDocument } from "./document.ts";
+import { DocumentError, parsePinnedWeightSet, parseTallyDocument } from "./document.ts";
+import type { PinnedWeightSet } from "./document.ts";
 import { RadixGateway } from "./gateway.ts";
 import { verifyTallyDocument } from "./verify.ts";
 
@@ -27,11 +33,12 @@ interface Args {
   gateway: string;
   tallyHash: string | null;
   xrdResource: string | null;
+  weightSet: string | null;
 }
 
 function usage(): never {
   process.stderr.write(
-    "usage: radix-tally-verify <tally.json | -> [--gateway URL] [--tally-hash HEX] [--xrd-resource ADDR]\n",
+    "usage: radix-tally-verify <tally.json | -> [--gateway URL] [--tally-hash HEX] [--xrd-resource ADDR] [--weight-set FILE]\n",
   );
   process.exit(4);
 }
@@ -41,13 +48,15 @@ function parseArgs(argv: string[]): Args {
   let gateway = DEFAULT_GATEWAY;
   let tallyHash: string | null = null;
   let xrdResource: string | null = null;
+  let weightSet: string | null = null;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i] as string;
-    if (a === "--gateway" || a === "--tally-hash" || a === "--xrd-resource") {
+    if (a === "--gateway" || a === "--tally-hash" || a === "--xrd-resource" || a === "--weight-set") {
       const v = argv[++i];
       if (v === undefined) usage();
       if (a === "--gateway") gateway = v;
       else if (a === "--tally-hash") tallyHash = v;
+      else if (a === "--weight-set") weightSet = v;
       else xrdResource = v;
     } else if (a.startsWith("--")) {
       usage();
@@ -58,7 +67,7 @@ function parseArgs(argv: string[]): Args {
     }
   }
   if (file === null) usage();
-  return { file, gateway, tallyHash, xrdResource };
+  return { file, gateway, tallyHash, xrdResource, weightSet };
 }
 
 /** The XRD resource address follows the network, which the gateway URL names. An unknown
@@ -88,6 +97,16 @@ async function main(): Promise<void> {
     process.exit(4);
   }
 
+  let weightSet: PinnedWeightSet | undefined;
+  if (args.weightSet !== null) {
+    try {
+      weightSet = parsePinnedWeightSet(JSON.parse(readFileSync(args.weightSet, "utf8")));
+    } catch (e) {
+      process.stderr.write(`MALFORMED: --weight-set ${args.weightSet}: ${e instanceof Error ? e.message : String(e)}\n`);
+      process.exit(4);
+    }
+  }
+
   const xrdResource = args.xrdResource ?? defaultXrdResource(args.gateway);
   if (xrdResource === null) {
     process.stderr.write(
@@ -115,6 +134,7 @@ async function main(): Promise<void> {
     args.tallyHash,
     new RadixGateway(args.gateway),
     xrdResource,
+    weightSet === undefined ? {} : { weightSet },
   );
 
   switch (outcome.kind) {

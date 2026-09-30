@@ -121,8 +121,9 @@ And the verdict, in full: quorum on both legs, the Binding gates, the DAO-contro
 Majority Judgment's qualifying grades and gauges at the document's own quantile, `invalid_ballots`,
 the withdrawn-candidate exclusion, and every seat allocation.
 
-A **mirror** document runs every leg above twice — once under the register it carries, once under
-the official Consultation App's own allowlist — and resolves no delegation at all. See "Mirror
+A **mirror** document runs every leg above twice — once under the register it carries, as scoped
+to the official component's network (check (g)), once under the official Consultation App's own
+allowlist — and resolves no delegation at all. See "Mirror
 tallies" below.
 
 ## Spaces (tally document v22)
@@ -189,7 +190,8 @@ Four things are **inputs**, carried inside the hashed document rather than deriv
   and confirm the lists this document embeds are the ones it claims to be; doing that needs the
   consultation registry, which is a different source from the Gateway state endpoints this tool
   reads. **This is the one gap in the v19 coverage**, and closing it would mean teaching the tool
-  to read the registry.
+  to read the registry. For a mirror document, `--weight-set` supplies that set by hand, and check
+  (g) then derives the document's register from it.
 
 All of them are covered by the hash exactly as everything else is, so a document that altered one
 would fail the hash check against what was committed on-ledger.
@@ -402,7 +404,8 @@ the OTER-rule result exactly as an ordinary Poll would, plus one extra block:
   "framework": { "source": "RadixDAO/governance-framework@470a047 Parameters Registry §3.2, §3.3A, §8A",
                  "quorum_pc": "3", "mas_pc": "0", "min_unique_voters": 0,
                  "eligible_voting_power_derivation": "quorum * 100 / quorum_pc (…)",
-                 "eligible_voting_power_bound": "33.333333333333333333" } | null
+                 "eligible_voting_power_bound": "33.333333333333333333" } | null,
+  "oter_register_scope": "full" | "network_independent"
 }
 ```
 
@@ -413,6 +416,23 @@ it was elevated to (`proposal` or `majority_judgment_election`); both are null o
 `official_max_selections` is a Proposal's `max_selections` (null when single choice, and on every
 Temperature Check). All six v3 keys are written on every v3 document; a missing one is MALFORMED,
 never read as null.
+
+`oter_register_scope` says how much of the weight-source register the OTER-rule leg applied, and
+is always present: exactly `"full"` or `"network_independent"`, and anything else, absence
+included, is MALFORMED. The register is a registry's on-ledger set, and every entry it names — an
+LSULP pair, a native, precision or shape pool, a delegation component — is an address on the
+registry's network. A mirror is weighed on the official component's network, so when the two
+differ those addresses do not exist on the ledger being read:
+
+- `"full"` — the component is on the registry's network. The register applies whole, with
+  delegation off (a mirror resolves none).
+- `"network_independent"` — the component is on another network. Every leg that names an address
+  is off: `lsulp`, `precision_pools`, `shape_pools`, and a `native_pools` allowlist, which turns
+  off rather than widening into discovery. `native_pools` in mode `all` stays, since discovery
+  names nothing. Direct XRD and every validator's stake units count as always.
+
+`weight_set_version` still names the full set; `weight_sources` carries the register as applied,
+so under `"network_independent"` it names no address. See check (g) below.
 
 **The framework bar.** The on-chain parameter sets carry absolute quorums and no MAS; the
 governance framework's Parameters Registry fixes each set's quorum and MAS as percentages of
@@ -456,7 +476,7 @@ above would compare a number against a rule that did not produce it, and every d
 reported after that would say more about the verifier than about the document.
 
 **Its presence is the switch.** There is no `--mirror` flag: `radix-tally-verify` runs exactly as
-above, and a document carrying `ballot_source` gets six checks instead of one:
+above, and a document carrying `ballot_source` gets seven checks instead of one:
 
 | Check | What it does | Where a mismatch is reported |
 |---|---|---|
@@ -466,9 +486,10 @@ above, and a document carrying `ballot_source` gets six checks instead of one:
 | **(d)** the window | How many re-read ballots landed before the vote's own start or after its deadline, both bounds resolved from `official_start` / `official_deadline` via the Gateway's timestamp selector — see below | `ballot_source.(d) ballots_outside_window` |
 | **(e)** the weight delta | The per-source gap between the two rules — OTER-rule weight minus official-rule weight over the same participating accounts, both sides from the same weight engine over the same account set. Zero wherever the register and the allowlist agree; signed where they do not | `ballot_source.(e) weight_delta_by_source. …` |
 | **(f)** the framework bar | Re-derives eligible voting power, MAS and the voter floor from the RE-READ parameter-set id and quorum (never the document's) and compares them against the top-level `eligible_voting_power`, `min_affirmative_support` and `min_unique_voters`, and the framework row against `ballot_source.framework` | `ballot_source.(f) …` |
+| **(g)** the register scope | Expects `oter_register_scope` `"full"` exactly when the bech32 network of `ballot_source.component` equals the network of the registry whose set `weight_set_version` names, else `"network_independent"`; derives the applied register from that set (delegation off, and under `"network_independent"` every named leg off) and requires `weight_sources` to equal it canonically. The OTER leg in (c) and (e) is weighed under this derived register, never the document's, so no register address reaches the other network's gateway — see below | `ballot_source.(g) …` |
 
 Every mismatch is still an ordinary `Difference` in the same `figures` outcome the rest of this
-tool uses — there is no separate mirror outcome kind. The prefix names which of (a)–(f) is wrong
+tool uses — there is no separate mirror outcome kind. The prefix names which of (a)–(g) is wrong
 without inventing a second vocabulary for it.
 
 Because both legs now go through one weight engine and differ only in the register handed to it,
@@ -503,6 +524,17 @@ already carries, to avoid a second Gateway call shape. That was wrong: `ballot_s
 so no ballot can ever exceed it, and the check could never flag a late one — a correct engine
 reporting `ballots_outside_window = 1` would have been contradicted by the verifier. Ported
 instead of reused, matching the engine exactly.
+
+**Check (g) needs the registry's network, and this tool reads the Gateway, not the registry.**
+Given `--weight-set`, the set and its network come from that file: `weight_set_version` must equal
+the file's, the expected scope follows from the two networks, and the register the document must
+carry is derived from the file's set. Without it, the document's own `weight_sources` stands in for
+the set: any address it names is a registry entry, so its network is the registry's (a register
+naming addresses on two networks is MALFORMED), and a `"full"` document naming another network's
+pair is caught by name. A register that names nothing leaves the registry's network unknown; the
+claimed scope then stands, and the derived register names nothing, so the weights recomputed are
+the same under either scope. What that case cannot confirm is that a set with named legs was
+scoped correctly — the `weight_set_version` gap below, closed by supplying the set.
 
 ### Worked example: mainnet Temperature Check #5
 
@@ -546,11 +578,24 @@ of those ballots under today's rule rather than a reconstruction of the number p
 ```
 npm install && npm run build
 radix-tally-verify <tally.json | -> [--gateway URL] [--tally-hash HEX] [--xrd-resource ADDR]
+                  [--weight-set FILE]
 ```
 
 The input may be the bare document or the API envelope (`{"document": …, "document_hash_blake2b":
 …}`). The gateway defaults to mainnet; the XRD resource address follows from the gateway URL
-(`mainnet` / `stokenet`), or pass `--xrd-resource` for anything else.
+(`mainnet` / `stokenet`), or pass `--xrd-resource` for anything else. For a mirror document, the
+gateway serves the official component's network.
+
+`--weight-set` supplies, for a mirror document, the weight-source set its `weight_set_version`
+names and the network of the registry that holds it:
+
+```json
+{ "network": "mainnet" | "stokenet", "weight_set_version": 7,
+  "weight_sources": { "native_pools": { "mode": "all" }, "lsulp": { … }, … } }
+```
+
+`weight_sources` is in the shape a tally document carries. Every address it names must be on the
+declared network, or the file is refused.
 
 Exit codes are the contract:
 

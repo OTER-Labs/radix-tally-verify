@@ -17,6 +17,7 @@ import type { Json } from "./canonical.ts";
 import { asArray, asObject, asString } from "./gateway.ts";
 import { GRADES } from "./verdict.ts";
 import type { GradeQuantile } from "./verdict.ts";
+import { networkOf, registerAddresses } from "./weights.ts";
 import type {
   ConcentratedPoolSources,
   FungibleSource,
@@ -103,6 +104,28 @@ export type WeightConfig =
  * `Governance` component.
  */
 export type MirrorKind = "temperature_check" | "proposal";
+
+/**
+ * `ballot_source.oter_register_scope`: how much of the weight-source register the OTER-rule leg
+ * applied. `"full"` when the official component is on the same network as the registry the set
+ * comes from; `"network_independent"` when it is not, in which case every leg that names an
+ * address is off (see `scopedRegister` in `src/mirror.ts`).
+ */
+export type RegisterScope = "full" | "network_independent";
+export const REGISTER_SCOPES: readonly RegisterScope[] = ["full", "network_independent"];
+
+/**
+ * The weight-source set `weight_set_version` names, as its registry holds it, and the network
+ * that registry lives on. An optional verifier input (`--weight-set`): this tool reads Gateway
+ * state, not the registry, so the set is supplied by whoever fetched it. With it, check (g)
+ * derives the register a mirror document must carry from the set itself; without it, from the
+ * document's own `weight_sources`.
+ */
+export interface PinnedWeightSet {
+  network: "mainnet" | "stokenet";
+  version: number;
+  sources: WeightSources;
+}
 
 /** The official rule's total split the same six ways an OTER-rule weight is. `liquid` is the
  * plain XRD balance; the other five are the sources the app's own policy counts. */
@@ -202,6 +225,8 @@ export interface BallotSource {
   /** `framework`: the governance framework row the bar was taken from, or `null` for a
    * parameter set the table does not name (which then decides nothing). */
   framework: FrameworkClaim | null;
+  /** `oter_register_scope`: `"full"` or `"network_independent"`, checked by (g). */
+  oterRegisterScope: RegisterScope;
 }
 
 /** `ballot_source.official_parameter_set`. */
@@ -976,7 +1001,56 @@ function parseBallotSource(raw: unknown): BallotSource | null {
     officialContinuation: parseOfficialContinuation(o),
     officialMaxSelections: nullableInt(o, "official_max_selections", "ballot_source.official_max_selections"),
     framework: parseFrameworkClaim(o),
+    oterRegisterScope: parseRegisterScope(o),
   };
+}
+
+/** Written on every v3 document, and only ever one of the two values: anything else, absence
+ * included, is a document the reference engine cannot have produced. */
+function parseRegisterScope(o: Record<string, unknown>): RegisterScope {
+  const path = "ballot_source.oter_register_scope";
+  if (!Object.hasOwn(o, "oter_register_scope") || o["oter_register_scope"] === undefined) {
+    fail(path, "is missing (it is written on every v3 document)");
+  }
+  const v = o["oter_register_scope"];
+  if (typeof v !== "string" || !(REGISTER_SCOPES as readonly string[]).includes(v)) {
+    fail(path, `is ${JSON.stringify(v)}, not one of ${JSON.stringify(REGISTER_SCOPES)}`);
+  }
+  return v as RegisterScope;
+}
+
+/**
+ * The `--weight-set` file: `{"network": "mainnet" | "stokenet", "weight_set_version": N,
+ * "weight_sources": {…}}`, the register in the same serialized shape a tally document carries.
+ * Every address the register names must be on the declared network — the set is a registry's,
+ * and a registry's entries live on its own ledger.
+ */
+export function parsePinnedWeightSet(input: unknown): PinnedWeightSet {
+  const setFail = (field: string, why: string): never => {
+    throw new DocumentError(`weight set: field ${field} ${why}`);
+  };
+  if (typeof input !== "object" || input === null || Array.isArray(input)) setFail("(root)", "is not a JSON object");
+  const o = input as Record<string, unknown>;
+  const network = o["network"];
+  if (network !== "mainnet" && network !== "stokenet") setFail("network", 'is neither "mainnet" nor "stokenet"');
+  const version = o["weight_set_version"];
+  if (typeof version !== "number" || !Number.isSafeInteger(version) || version < 0) {
+    setFail("weight_set_version", "is missing or not a non-negative integer");
+  }
+  let sources: WeightSources;
+  try {
+    sources = parseWeightSources(o["weight_sources"]);
+  } catch (e) {
+    if (e instanceof DocumentError) setFail("weight_sources", e.message);
+    throw e;
+  }
+  for (const address of registerAddresses(sources!)) {
+    const on = networkOf(address);
+    if (on !== network) {
+      setFail("weight_sources", `names ${address}, which is on ${on ?? "no recognisable network"}, not on ${String(network)}`);
+    }
+  }
+  return { network: network as "mainnet" | "stokenet", version: version as number, sources: sources! };
 }
 
 /**
