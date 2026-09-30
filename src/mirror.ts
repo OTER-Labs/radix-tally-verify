@@ -37,12 +37,15 @@
  *       `allowlist_version` / `allowlist_hash` naming the list it claims to have applied. The
  *       list comes from this package's own `data/` copy, never from the document: a document
  *       verified against a list it supplied itself would be verified against nothing.
- *   (d) **`ballots_outside_window`** — how many re-read ballots landed outside the window this
- *       document was pinned to. Both bounds are resolved from `official_snapshot` / `official_deadline`
- *       via the SAME Gateway timestamp selector the reference engine's own state-version lookup
- *       uses, ported here rather than approximated — see `resolveStateVersionAtTimestamp` and
+ *   (d) **`ballots_outside_window`** — how many re-read ballots landed outside the vote's own
+ *       window. Both bounds are resolved from `official_start` / `official_deadline` via the SAME
+ *       Gateway timestamp selector the reference engine's own state-version lookup uses, ported
+ *       here rather than approximated — see `resolveStateVersionAtTimestamp` and
  *       `ballotsOutsideWindow` below, whose open-window convention (an unbounded upper bound
- *       while `official_deadline` is still in the future) mirrors the engine's exactly.
+ *       while `official_deadline` is still in the future) mirrors the engine's exactly. The
+ *       window opens at the vote's `start`, never at `official_snapshot`: the snapshot fixes the
+ *       weights only, and a vote that weighs at an earlier round's snapshot (a Majority Judgment
+ *       rerun) still opens for ballots at its own start.
  *   (e) **`weight_delta_by_source`** — the per-source gap between the two rules, OTER-rule
  *       weight minus official-rule weight over the same participating accounts. Zero on every
  *       source where the DAO's register and the app's allowlist name the same positions; signed,
@@ -575,7 +578,7 @@ async function resolveStateVersionAtTimestamp(
  * would be one round trip per voter, where the two window bounds are two round trips for the
  * whole vote. The comparison is exact either way — state version is monotone in ledger time."
  *
- * Both bounds are themselves resolved from `official_snapshot` / `official_deadline` by
+ * Both bounds are themselves resolved from `official_start` / `official_deadline` by
  * {@link resolveStateVersionAtTimestamp} — the caller's job, not this pure function's, exactly as
  * the engine separates the comparison from the two timestamp lookups that produce its bounds.
  * `upperBoundSv` is `Number.MAX_SAFE_INTEGER` while the deadline is still in the future (the
@@ -725,10 +728,11 @@ export async function verifyMirrorBallots(
   // (d) ballots outside the window: both bounds resolved from the official timestamps via the
   // SAME Gateway timestamp selector the engine's own state-version lookup uses — see
   // `resolveStateVersionAtTimestamp` and `ballotsOutsideWindow` above. The lower bound is the
-  // snapshot's state version (`official_snapshot`, which (a) has just checked against the
-  // entry) and is always resolved; the upper bound is unbounded while `official_deadline` has
+  // state version at the vote's own `start` (`official_start`, which (a) has just checked
+  // against the entry) — not `official_snapshot`, which fixes the weights and may precede the
+  // window — and is always resolved; the upper bound is unbounded while `official_deadline` has
   // not yet passed.
-  const lowerBoundSv = await resolveStateVersionAtTimestamp(gw, xrdResource, bs.officialSnapshot);
+  const lowerBoundSv = await resolveStateVersionAtTimestamp(gw, xrdResource, bs.officialStart);
   const nowSeconds = Math.floor(Date.now() / 1000);
   const upperBoundSv =
     bs.officialDeadline > nowSeconds

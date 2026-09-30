@@ -463,7 +463,7 @@ above, and a document carrying `ballot_source` gets six checks instead of one:
 | **(a)** the ballots | Re-reads the official component's own state — `temperature_checks` / `proposals` key-value store → the entry named by `official_id` → its `voters` key-value store, all at `ballot_state_version` — and compares every account's selection, plus the entry's own metadata, against what `ballot_source` claims: `quorum` / `approval_threshold` of its parameter-set leg, the set's `{id, label, version, variant}`, `start` / `deadline` / `vote_count` / `revote_count`, a Temperature Check's `snapshot`, `outcome` and `continuation`, a Proposal's `max_selections` | `ballot_source.(a) …` |
 | **(b)** the official rule | Checks `allowlist_version` / `allowlist_hash` against this package's own copy of the list, then recomputes the app's policy — direct XRD, every validator's LSUs, LSULP and the allowlisted positions — at `snapshot_state_version` with the same weight engine check (c) uses, handed the allowlist as its register; summed per option over every ballot, barred accounts included, and decided under the same bar and the same label sides as the OTER rule (quorum, threshold, MAS, voter floor); compared against the claimed totals, verdict and `totals_by_source` split | `ballot_source.(b) official_rule. …` |
 | **(c)** the OTER rule | The ordinary v20 pipeline above, completely unchanged — this is why a mirror document's top-level fields are checked exactly as a Poll's would be | the usual unprefixed field names (`totals[…]`, `votes[…].weight`, `approved`, …) |
-| **(d)** the window | How many re-read ballots landed after the deadline or before the snapshot, both bounds resolved from `official_snapshot` / `official_deadline` via the Gateway's timestamp selector — see below | `ballot_source.(d) ballots_outside_window` |
+| **(d)** the window | How many re-read ballots landed before the vote's own start or after its deadline, both bounds resolved from `official_start` / `official_deadline` via the Gateway's timestamp selector — see below | `ballot_source.(d) ballots_outside_window` |
 | **(e)** the weight delta | The per-source gap between the two rules — OTER-rule weight minus official-rule weight over the same participating accounts, both sides from the same weight engine over the same account set. Zero wherever the register and the allowlist agree; signed where they do not | `ballot_source.(e) weight_delta_by_source. …` |
 | **(f)** the framework bar | Re-derives eligible voting power, MAS and the voter floor from the RE-READ parameter-set id and quorum (never the document's) and compares them against the top-level `eligible_voting_power`, `min_affirmative_support` and `min_unique_voters`, and the framework row against `ballot_source.framework` | `ballot_source.(f) …` |
 
@@ -480,16 +480,21 @@ totals, `total_weight` and `quorum_met` are recomputed and compared on both legs
 verdict fields are checked to be null.
 
 **`ballots_outside_window` is ported from the reference engine, not approximated.** Both window
-bounds are resolved from `official_snapshot` / `official_deadline` — timestamps — via the Gateway's
+bounds are resolved from `official_start` / `official_deadline` — timestamps — via the Gateway's
 timestamp selector (`POST /state/entity/details` with `at_ledger_state: { timestamp }`, XRD as the
 anchor address since any well-known entity works and its data is never read): the SAME call the
 engine's own state-version lookup makes, and the SAME comparison its outside-window count makes
 — a ballot's own
-`last_updated_at_state_version` outside `[snapshot_state_version, deadline_state_version]` counts as
+`last_updated_at_state_version` outside `[start_state_version, deadline_state_version]` counts as
 late. `deadline_state_version` is unbounded while `official_deadline` is still in the future (the
 engine's own unbounded `deadline_state_version` sentinel): there is no ledger state after a future
 deadline to
 resolve, so an open vote reports zero late ballots rather than every ballot as late.
+
+The window opens at the vote's own `start`, for every kind — never at `official_snapshot`. The
+snapshot fixes the weights and nothing else. For a Proposal and a first round the two are the same
+instant; a Majority Judgment rerun weighs at round one's snapshot but opens for ballots at its own
+start, so a ballot cast between the two lies outside its window.
 
 An earlier version of this check bounded the window by `[snapshot_state_version,
 ballot_source.ballot_state_version]` instead — reusing two state-version anchors the document

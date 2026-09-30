@@ -24,6 +24,7 @@ const EMPTY_PAGE = { items: [] };
 export class FakeGateway implements GatewayClient {
   private detailsQueue: unknown[] = [];
   private timestampDetailsQueue: unknown[] = [];
+  private timestampDetailsAt = new Map<string, unknown>();
   private pageResponses = new Map<string, unknown>();
   private validatorsQueue: unknown[] = [];
   private vaultDetailsQueue: unknown[] = [];
@@ -69,6 +70,14 @@ export class FakeGateway implements GatewayClient {
    * entityDetails queue keeps its fail-loudly behaviour, since those calls are the ones whose
    * order is the contract.
    */
+
+  /** A timestamp-keyed answer for `entityDetailsAtTimestamp`, consulted before the FIFO queue:
+   * for a test whose point is WHICH instant a bound is resolved from, so that asking for the
+   * wrong one gets the wrong state version instead of whatever happens to be next in line. */
+  onTimestampDetailsAt(unixSeconds: number, response: unknown): this {
+    this.timestampDetailsAt.set(new Date(unixSeconds * 1000).toISOString(), response);
+    return this;
+  }
 
   onVaultDetails(response: unknown): this {
     this.vaultDetailsQueue.push(response);
@@ -192,6 +201,8 @@ export class FakeGateway implements GatewayClient {
 
   entityDetailsAtTimestamp(address: string, timestampIso: string): Promise<unknown> {
     this.calls.push(`timestamp-details:${address}:${timestampIso}`);
+    const keyed = this.timestampDetailsAt.get(timestampIso);
+    if (keyed !== undefined) return Promise.resolve(keyed);
     const next = this.timestampDetailsQueue.shift();
     if (next === undefined) {
       throw new GatewayError(`FakeGateway: unexpected entityDetailsAtTimestamp for ${timestampIso}`);

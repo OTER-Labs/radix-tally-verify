@@ -214,7 +214,7 @@ function tcRegisterKeys(): unknown {
  * `temperature_check` leg of its own `Standard` parameter-set snapshot, plus its own `snapshot`,
  * and no outcome or continuation recorded yet. */
 function tcRegisterData(
-  over: { setId?: string; quorum?: string; threshold?: string; deadline?: string } = {},
+  over: { setId?: string; quorum?: string; threshold?: string; deadline?: string; snapshot?: string } = {},
 ): unknown {
   const s = (field_name: string, value: string) => ({ field_name, value });
   const fields = [
@@ -237,7 +237,7 @@ function tcRegisterData(
         },
       ],
     },
-    s("snapshot", String(OFFICIAL_START)),
+    s("snapshot", over.snapshot ?? String(OFFICIAL_START)),
     s("start", String(OFFICIAL_START)),
     s("deadline", over.deadline ?? String(OFFICIAL_DEADLINE)),
     s("vote_count", "4"),
@@ -305,6 +305,9 @@ function mirrorGateway(overrides: {
   votersData?: unknown;
   startSv?: number;
   deadlineSv?: number | null;
+  /** Unix seconds -> state version, answered by instant rather than in call order. When given,
+   * `startSv` / `deadlineSv` are not queued. */
+  timestampSv?: Record<number, number>;
 } = {}): FakeGateway {
   const gw = new FakeGateway()
     .onDetails(overrides.componentDetails ?? componentDetails())
@@ -316,11 +319,17 @@ function mirrorGateway(overrides: {
     .onDetails(resourceInfo()) // (c) the ordinary OTER-rule pipeline
     .onValidators(validatorsResponse())
     .onValidators(validatorsResponse())
-    .onValidators(validatorsResponse())
-    .onTimestampDetails(timestampDetails(overrides.startSv ?? SNAPSHOT_SV)); // (d) official_start
-  const deadlineSv = "deadlineSv" in overrides ? overrides.deadlineSv : BALLOT_SV;
-  if (deadlineSv !== null) {
-    gw.onTimestampDetails(timestampDetails(deadlineSv)); // (d) official_deadline, window closed
+    .onValidators(validatorsResponse());
+  if (overrides.timestampSv !== undefined) {
+    for (const [seconds, sv] of Object.entries(overrides.timestampSv)) {
+      gw.onTimestampDetailsAt(Number(seconds), timestampDetails(sv));
+    }
+  } else {
+    gw.onTimestampDetails(timestampDetails(overrides.startSv ?? SNAPSHOT_SV)); // (d) official_start
+    const deadlineSv = "deadlineSv" in overrides ? overrides.deadlineSv : BALLOT_SV;
+    if (deadlineSv !== null) {
+      gw.onTimestampDetails(timestampDetails(deadlineSv)); // (d) official_deadline, window closed
+    }
   }
   return gw
     .onKvsKeys(TC_REGISTER_KVS, tcRegisterKeys())
@@ -584,6 +593,45 @@ test("(d) a still-open window (deadline in the future) counts no ballot late", a
     XRD,
   );
   assert.deepEqual(outcome, { kind: "match", hashChecked: true });
+});
+
+/**
+ * A vote whose weight snapshot precedes its own start, as a Majority Judgment rerun's does (it
+ * weighs at round one's snapshot and opens at its own start). The window opens at `start`: the
+ * liquid voter's ballot, cast after the snapshot but before the start, is outside it. The
+ * timestamps are answered by instant, so a lower bound resolved from `official_snapshot` gets the
+ * snapshot's state version and counts that ballot inside.
+ */
+test("(d) the window opens at the vote's own start, not at an earlier weight snapshot", async () => {
+  const snapshot = OFFICIAL_START - 86_400;
+  const timestampSv = {
+    [snapshot]: SNAPSHOT_SV, // before every ballot
+    [OFFICIAL_START]: SNAPSHOT_SV + 20, // after the liquid voter's (+10), before the rest
+    [OFFICIAL_DEADLINE]: BALLOT_SV,
+  };
+  const doc = mirrorDoc({}, { official_snapshot: snapshot, ballots_outside_window: 1 });
+  const outcome = await verifyTallyDocument(
+    doc,
+    hash(doc),
+    mirrorGateway({ tcRegisterData: tcRegisterData({ snapshot: String(snapshot) }), timestampSv }),
+    XRD,
+  );
+  assert.deepEqual(outcome, { kind: "match", hashChecked: true });
+
+  // A document that opened the window at the snapshot instead, counting no ballot late, is a (d)
+  // disagreement and nothing else.
+  const early = mirrorDoc({}, { official_snapshot: snapshot, ballots_outside_window: 0 });
+  const outcomeEarly = await verifyTallyDocument(
+    early,
+    null,
+    mirrorGateway({ tcRegisterData: tcRegisterData({ snapshot: String(snapshot) }), timestampSv }),
+    XRD,
+  );
+  assert.equal(outcomeEarly.kind, "figures");
+  if (outcomeEarly.kind !== "figures") return;
+  assert.deepEqual(outcomeEarly.differences, [
+    { field: "ballot_source.(d) ballots_outside_window", document: "0", recomputed: "1" },
+  ]);
 });
 
 test("(e) a stale weight_delta_by_source leg is a figures disagreement naming (e)", async () => {
