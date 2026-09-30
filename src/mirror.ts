@@ -485,17 +485,19 @@ function sumLegs(
  * LSUs, LSULP and the allowlisted positions, which is what `weights` already holds because the
  * caller computed it under the ALLOWLIST as its register — summed per option.
  *
- * The official leg takes the same bar as the OTER leg: the official vote's own absolute quorum
- * and approval threshold, plus the framework's Minimum Affirmative Support and distinct-voter
- * floor for its parameter set. Every counted ballot enters `total_weight` (and so quorum),
- * Abstain included; only the Approve and Reject sides enter the decisive share. `approved` is
+ * The official leg takes the same quorum and approval bar as the OTER leg: the official vote's
+ * own absolute quorum and approval threshold, plus the framework's Minimum Affirmative Support
+ * and distinct-voter floor for its parameter set. It does NOT take the OTER leg's
+ * `excluded_accounts` bar: the official vote has no such bar, so every ballot counts here —
+ * toward the totals, `total_weight` and the voter count — a barred account's included. An
+ * Abstain ballot enters `total_weight` (and so quorum) like any other; only the Approve and
+ * Reject sides enter the decisive share. `approved` is
  * `null` when the vote has no decision sides — a label set other than Approve/Reject(/Abstain),
  * a multi-select proposal, or a parameter set the framework table does not name.
  */
 function officialRuleFigures(
   ballots: Map<string, number[]>,
   weights: Map<string, Dec>,
-  barred: Set<string>,
   optionCount: number,
   quorum: Dec,
   approvalThresholdPc: Dec,
@@ -507,7 +509,6 @@ function officialRuleFigures(
   let totalWeight = Dec.ZERO;
   let voters = 0;
   for (const [account, selection] of ballots) {
-    if (barred.has(account)) continue;
     const weight = weights.get(account) ?? Dec.ZERO;
     voters++;
     totalWeight = totalWeight.add(weight);
@@ -658,7 +659,9 @@ export async function verifyMirrorBallots(
   }
 
   // (b) the official rule: the app's own policy, over the document's own ballots (which (a) has
-  // just checked equal the on-chain ones) and its own excluded_accounts bar.
+  // just checked equal the on-chain ones) — every one of them. The official vote has no
+  // excluded_accounts bar, so a barred account's ballot counts on this leg; only the OTER leg
+  // strikes it.
   //
   // The list comes from THIS package's data/, chosen by the component's network — never from the
   // document, which would make the claim unfalsifiable. The version and hash are checked first,
@@ -686,7 +689,6 @@ export async function verifyMirrorBallots(
   const official = officialRuleFigures(
     publishedBallots,
     officialWeights,
-    barred,
     doc.totals.length,
     bs.officialQuorum,
     bs.officialApprovalThreshold.mul(Dec.fromInt(100)),

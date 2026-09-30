@@ -315,8 +315,11 @@ OTER can publish a document that reads the SAME on-chain ballots and tallies the
 so proves the same ballots were read — and under the **OTER rule**, that platform's own
 `WEIGHT_RULE`. Both take ONE bar, the official vote's own: the absolute `quorum` and
 `approval_threshold` of its parameter set, plus the governance framework's Minimum Affirmative
-Support (MAS) and distinct-voter floor for that set. The only thing the two results can disagree
-about is the weight function.
+Support (MAS) and distinct-voter floor for that set. The DAO-controlled-funds bar
+(`excluded_accounts`) belongs to the OTER rule alone: the official vote has no such bar, so the
+official rule counts every ballot — a barred account's included — toward its totals, its
+`total_weight` and its voter count, exactly as the Consultation App does. Beyond that bar, the only
+thing the two results can disagree about is the weight function.
 
 The official component is the Radix DAO `Governance` 1.0.0 blueprint. Each vote carries its own
 snapshot of a **parameter set** (`id`, `label`, `version`, and a `Standard` or `MajorityJudgment`
@@ -458,7 +461,7 @@ above, and a document carrying `ballot_source` gets six checks instead of one:
 | Check | What it does | Where a mismatch is reported |
 |---|---|---|
 | **(a)** the ballots | Re-reads the official component's own state — `temperature_checks` / `proposals` key-value store → the entry named by `official_id` → its `voters` key-value store, all at `ballot_state_version` — and compares every account's selection, plus the entry's own metadata, against what `ballot_source` claims: `quorum` / `approval_threshold` of its parameter-set leg, the set's `{id, label, version, variant}`, `start` / `deadline` / `vote_count` / `revote_count`, a Temperature Check's `snapshot`, `outcome` and `continuation`, a Proposal's `max_selections` | `ballot_source.(a) …` |
-| **(b)** the official rule | Checks `allowlist_version` / `allowlist_hash` against this package's own copy of the list, then recomputes the app's policy — direct XRD, every validator's LSUs, LSULP and the allowlisted positions — at `snapshot_state_version` with the same weight engine check (c) uses, handed the allowlist as its register; summed per option, and decided under the same bar and the same label sides as the OTER rule (quorum, threshold, MAS, voter floor); compared against the claimed totals, verdict and `totals_by_source` split | `ballot_source.(b) official_rule. …` |
+| **(b)** the official rule | Checks `allowlist_version` / `allowlist_hash` against this package's own copy of the list, then recomputes the app's policy — direct XRD, every validator's LSUs, LSULP and the allowlisted positions — at `snapshot_state_version` with the same weight engine check (c) uses, handed the allowlist as its register; summed per option over every ballot, barred accounts included, and decided under the same bar and the same label sides as the OTER rule (quorum, threshold, MAS, voter floor); compared against the claimed totals, verdict and `totals_by_source` split | `ballot_source.(b) official_rule. …` |
 | **(c)** the OTER rule | The ordinary v20 pipeline above, completely unchanged — this is why a mirror document's top-level fields are checked exactly as a Poll's would be | the usual unprefixed field names (`totals[…]`, `votes[…].weight`, `approved`, …) |
 | **(d)** the window | How many re-read ballots landed after the deadline or before the snapshot, both bounds resolved from `official_snapshot` / `official_deadline` via the Gateway's timestamp selector — see below | `ballot_source.(d) ballots_outside_window` |
 | **(e)** the weight delta | The per-source gap between the two rules — OTER-rule weight minus official-rule weight over the same participating accounts, both sides from the same weight engine over the same account set. Zero wherever the register and the allowlist agree; signed where they do not | `ballot_source.(e) weight_delta_by_source. …` |

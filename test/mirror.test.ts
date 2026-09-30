@@ -610,6 +610,135 @@ test("(e) a stale weight_delta_by_source leg is a figures disagreement naming (e
   assert.equal(d?.recomputed, "0");
 });
 
+/**
+ * The DAO-controlled-funds bar is the OTER rule's, not the official vote's. Here the revoter
+ * (Against, 30) is in `excluded_accounts` and the official quorum is 150:
+ *
+ * - the OTER leg strikes the ballot: Against 0, For 145, `total_weight` 145, two voters — and
+ *   145 misses the 150 quorum, so nothing is approved;
+ * - the official leg counts it, as the official vote does: Against 30, For 145, `total_weight`
+ *   175 — quorum met, approved.
+ *
+ * So the barred ballot moves the official leg's totals, its weight and (through them) its
+ * quorum verdict, and a document publishing exactly that is a MATCH. `totals_by_source` stays
+ * over every voter, and `weight_delta_by_source` over the OTER leg's counted accounts, as ever.
+ */
+function barredMirrorDoc(): Record<string, unknown> {
+  return mirrorDoc(
+    {
+      excluded_accounts: [ACC_REVOTER],
+      votes: [
+        { account: ACC_LIQUID, selection: [1], weight: "100" },
+        { account: ACC_STAKED, selection: [1], weight: "45" },
+        { account: ACC_REVOTER, selection: [0], weight: "30", excluded: true },
+      ],
+      totals: ["0", "145"],
+      total_weight: "145",
+      voter_count: 2,
+      quorum: "150",
+      quorum_met: false,
+      approve_weight: "145",
+      reject_weight: "0",
+      approved: false,
+      eligible_voting_power: "5000",
+    },
+    {
+      official_quorum: "150",
+      official_rule: {
+        rule: OFFICIAL_RULE_TEXT,
+        allowlist_version: "2026-09-06",
+        allowlist_hash: STOKENET_ALLOWLIST_HASH,
+        totals: ["30", "145"],
+        totals_by_source: {
+          liquid: "150",
+          lsu: "25",
+          lsulp: "0",
+          pool_units: "0",
+          precision_pools: "0",
+          shape_pools: "0",
+        },
+        total_weight: "175",
+        quorum_met: true,
+        approved: true,
+      },
+    },
+  );
+}
+
+test("a barred account's ballot counts on the official leg and not on the OTER leg, and is a MATCH", async () => {
+  const doc = barredMirrorDoc();
+  const outcome = await verifyTallyDocument(
+    doc,
+    hash(doc),
+    mirrorGateway({ tcRegisterData: tcRegisterData({ quorum: "150" }) }),
+    XRD,
+  );
+  assert.deepEqual(outcome, { kind: "match", hashChecked: true });
+});
+
+test("a mirror that bars the official leg too is a figures disagreement naming (b)", async () => {
+  // The same vote, published as if the official leg had struck the barred ballot: Against 0,
+  // total_weight 145, quorum missed. The official vote has no such bar, so every one of those
+  // is wrong — and the OTER leg, which does strike it, is untouched and raises nothing.
+  const doc = barredMirrorDoc();
+  const bs = doc["ballot_source"] as Record<string, unknown>;
+  bs["official_rule"] = {
+    ...(bs["official_rule"] as Record<string, unknown>),
+    totals: ["0", "145"],
+    total_weight: "145",
+    quorum_met: false,
+    approved: false,
+  };
+  const outcome = await verifyTallyDocument(
+    doc,
+    null,
+    mirrorGateway({ tcRegisterData: tcRegisterData({ quorum: "150" }) }),
+    XRD,
+  );
+  assert.equal(outcome.kind, "figures");
+  if (outcome.kind !== "figures") return;
+  const byField = new Map(outcome.differences.map((x) => [x.field, x]));
+  assert.deepEqual(
+    [...byField.keys()].sort(),
+    [
+      "ballot_source.(b) official_rule.approved",
+      "ballot_source.(b) official_rule.quorum_met",
+      "ballot_source.(b) official_rule.total_weight",
+      "ballot_source.(b) official_rule.totals[0]",
+    ],
+    "only the official leg's figures differ; the OTER leg's bar is intact",
+  );
+  assert.equal(byField.get("ballot_source.(b) official_rule.totals[0]")?.recomputed, "30");
+  assert.equal(byField.get("ballot_source.(b) official_rule.total_weight")?.recomputed, "175");
+  assert.equal(byField.get("ballot_source.(b) official_rule.quorum_met")?.recomputed, "true");
+});
+
+test("the OTER leg still strikes the barred ballot: counting it there is a figures disagreement", async () => {
+  // The top-level (OTER-rule) figures published as if the bar did not exist: the recomputation
+  // strikes the barred ballot, so Against is 0, not 30, and the voter count 2, not 3.
+  const doc = barredMirrorDoc();
+  doc["totals"] = ["30", "145"];
+  doc["total_weight"] = "175";
+  doc["voter_count"] = 3;
+  const outcome = await verifyTallyDocument(
+    doc,
+    null,
+    mirrorGateway({ tcRegisterData: tcRegisterData({ quorum: "150" }) }),
+    XRD,
+  );
+  assert.equal(outcome.kind, "figures");
+  if (outcome.kind !== "figures") return;
+  const totals0 = outcome.differences.find((x) => x.field === "totals[0]");
+  const voters = outcome.differences.find((x) => x.field === "voter_count");
+  assert.ok(totals0, `expected a totals[0] difference, got: ${JSON.stringify(outcome.differences)}`);
+  assert.equal(totals0?.recomputed, "0");
+  assert.equal(voters?.recomputed, "2");
+  assert.ok(
+    !outcome.differences.some((x) => x.field.startsWith("ballot_source.(b)")),
+    "the official leg, which counts the ballot, agrees",
+  );
+});
+
 // --- An official Proposal: three options decided by label, Abstain counted toward quorum only. ---
 
 const GP_REGISTER_KVS = "internal_keyvaluestore_rdx1kvgp0000000000000000000000000000000010";
