@@ -3,17 +3,26 @@
 Independently recompute a Radix governance consultation's tally from Gateway state, and check it
 against the hash committed on-ledger.
 
-**Status: working. Supported tally document version: 22 (21 was never issued).** The full
+**Status: working. Supported tally document version: 22 (21 was never issued); supported mirror
+block version: 3, Temperature Check, Proposal and both Majority Judgment rounds.** The full
 pipeline exists: weight recomputation from Gateway historical state, verdict re-derivation,
 canonical re-serialization, and the hash check, behind a CLI whose exit codes distinguish the
 three outcomes above.
 
-No document is refused for its version. Verification is driven by field presence, so one written
-before any given leg existed takes the absent-means-off path on each field and verifies exactly as
-it did before that leg was added. The version number itself is read for one purpose only: the
-v19→v20 verdict change is a *comparison* rather than a field, so each document's `approved` is
-recomputed under the bar in force when it was settled — see
+No **tally** document is refused for its `tally_doc_version`. Verification is driven by field
+presence, so one written before any given leg existed takes the absent-means-off path on each
+field and verifies exactly as it did before that leg was added. A **mirror** document is
+version-checked: `mirror_doc_version` 1 and 2 are refused, because each states a different
+official rule that cannot be recomputed under v3's. The tally version number itself is read for
+one purpose only: the v19→v20 verdict change is a *comparison* rather than a field, so each
+document's `approved` is recomputed under the bar in force when it was settled — see
 [the approval bar](#the-approval-bar-is-at-or-above).
+
+The reads are fail-closed. An entity-details answer that leaves out a preallocated voter account,
+or that answers at a different state version than the read asked for, is an error rather than a
+zero. A resource's missing `symbol` metadata is an error unless the resource answered and
+declares no symbol. Membership weight comes from the collection amount, never from local ids an
+opt-in may have silently emptied.
 
 ---
 
@@ -42,7 +51,8 @@ this tool:
 
 1. **Recomputes each voter's weight** from Radix Gateway historical state at the snapshot the
    document pins — XRD plus validator stake units at their redemption rate, plus whatever the
-   document's own source register says counts.
+   document's own source register says counts. Every state read must answer at the state version
+   it asked for, and a preallocated account must appear in the answer.
 2. **Re-derives the verdict** by applying the document's stated rules to those weights — including
    the DAO-controlled-funds bar, which strikes ballots cast from accounts the document's
    `excluded_accounts` register names, and the Grade Quantile the document publishes, which
@@ -71,7 +81,8 @@ noise:
   carries ~15–16 significant decimal digits and these values carry 18 after the point alone.
 - **`src/canonical.ts`** — the canonical JSON encoding and the blake2b-256 tally hash.
 - **`src/gateway.ts`** — a minimal Gateway client pinned to an explicit `state_version`, covering
-  only the three endpoints the weight rule reads.
+  the state endpoints the weight rule and the mirror reads need. It refuses an answer that
+  carries no ledger state, or that answers at another state than the one asked for.
 - **`src/precise.ts`** — scrypto `PreciseDecimal`: the 36-decimal, I256 fixed point the
   concentrated-liquidity legs are evaluated in before being narrowed back to 18. A separate type
   from `Dec` on purpose, because the two scales are not interchangeable in the rule.
@@ -92,7 +103,10 @@ noise:
   ballots and vote metadata, recomputing the Consultation App's own rule from the static allowlist
   this package ships under `data/`, the outside-window count, the per-source gap between the two
   rules, and the governance framework's bar (eligible voting power, MAS, the voter floor) for the
-  vote's parameter set. See "Mirror tallies" below.
+  vote's parameter set. Majority Judgment rounds are read from their own register and published as
+  Elections. See "Mirror tallies" below.
+- **`src/weight-rule.ts`** — the rule in words for each space configuration, checked against the
+  document's `weight_rule`, and the register each `weight_config` implies.
 - **`src/verify.ts` / `src/cli.ts`** — orchestration and the command line. `--mirror` is not a
   flag: a document carrying `ballot_source` gets the extra checks automatically.
 - **`test/`** — cross-implementation agreement, plus weight, concentrated-liquidity, delegation
@@ -115,7 +129,7 @@ are switched on. Every leg below is recomputed from Gateway historical state at 
 | **Shape pools** (CaviarNine `QuantaSwap`) | 17 | receipt `liquidity_claims` against `tick_index.current`, the active reserves, and the full `bin_map` key-value store | recomputed |
 | **Delegation** | 18 | the resolution, the per-delegate sums, and their effect on every total and on the verdict | recomputed **from a carried input** — see below |
 | **Fungible space** | 22 | the account's balance of the ONE resource `weight_config` names — replaces the whole sum above, not a leg on top of it | recomputed |
-| **Membership space** | 22 | 1-or-0 per account (≥1 non-fungible of the named resource held), replacing the sum above the same way | recomputed |
+| **Membership space** | 22 | 1-or-0 per account (≥1 non-fungible of the named resource held), read from the collection amount at Global aggregation and replacing the sum above the same way | recomputed |
 
 And the verdict, in full: quorum on both legs, the Binding gates, the DAO-controlled-funds bar,
 Majority Judgment's qualifying grades and gauges at the document's own quantile, `invalid_ballots`,
@@ -152,7 +166,10 @@ everywhere else:
   are the space's absolute `min_binding_quorum`, its recall path, and choosing a Membership space.
 - **`membership: {resource}`** — a `Membership` space's weight is `1` if the account holds at
   least one non-fungible of that resource at the snapshot, `0` otherwise, **however many it
-  holds**. Whoever controls the resource's mint controls the electorate.
+  holds**. The count is read from the collection's own `amount` at Global aggregation, not from
+  local ids: those ids exist only because of an opt-in, and an opt-in the Gateway silently stops
+  honouring would make every member weigh zero with no error anywhere. Whoever controls the
+  resource's mint controls the electorate.
 
 Both legs **replace** the ordinary XRD sum rather than adding to it — a Fungible or Membership
 document's `xrd`, `lsu`, `pool_units`, `lsulp`, `precision_pools` and `shape_pools` legs are all
@@ -164,7 +181,15 @@ means — a member delegating to another member is the same act whatever the wei
 `asset_symbol` is **checked, not merely carried**: the named resource's `symbol` metadata is
 re-read at the same `snapshot_state_version` (the `Xrd` rule costs no Gateway call — its answer
 is the literal `"XRD"`) and compared against the document's claim. A mismatch is a figures-class
-finding, exactly like a wrong weight.
+finding, exactly like a wrong weight. The read is matched by address, and it fails closed: an
+answer with no item for that resource, or with no `explicit_metadata` block at all, is MALFORMED.
+The empty string means one thing only — the resource answered and declares no symbol.
+
+`weight_rule` is checked too: when the document carries it, it must equal the text its own
+`weight_config` implies, and a different sentence is a figure difference. `weight_sources` must
+equal the register that config implies — a `Fungible` or `Membership` document carries its one
+space leg and none of the XRD-priced valuation legs, while an `Xrd` document carries neither
+space leg.
 
 No verdict logic changed: quorum, the approval bar, seat allocation and Majority Judgment are
 identical whichever config produced the weights they operate on. `src/mirror.ts` is unaffected —
@@ -185,13 +210,13 @@ Four things are **inputs**, carried inside the hashed document rather than deriv
   through the Gateway. Everything downstream of it is recomputed: the resolution and its published
   refusal reasons, each delegator's weight, the per-delegate sums, `delegated_weight_total`, the
   per-ballot `delegated_weight` / `effective_weight` split, and every total and verdict they feed.
-- **`weight_set_version` and `excluded_set_version`** (v19) — carried, hashed, and not checked
-  against the registry. Their purpose is to let someone fetch those two on-ledger sets *by version*
-  and confirm the lists this document embeds are the ones it claims to be; doing that needs the
-  consultation registry, which is a different source from the Gateway state endpoints this tool
-  reads. **This is the one gap in the v19 coverage**, and closing it would mean teaching the tool
-  to read the registry. For a mirror document, `--weight-set` supplies that set by hand, and check
-  (g) then derives the document's register from it.
+- **`weight_set_version` and `excluded_set_version`** (v19) — the versions the registry pinned.
+  This tool reads Gateway state, not the registry, so it cannot fetch those sets by version on its
+  own. Supply them with `--weight-set` and `--excluded-set` and both the version and the list the
+  document embeds are checked against the registry's set: the register against
+  `weight_sources`, the barred accounts against `excluded_accounts`. Without the files, both are
+  carried and hashed but not checked. For a mirror document, `--weight-set` also supplies the
+  register check (g) derives the document's scope from.
 
 All of them are covered by the hash exactly as everything else is, so a document that altered one
 would fail the hash check against what was committed on-ledger.
@@ -311,25 +336,27 @@ index in that list must not accuse a voter of malformity on a ballot nobody read
 
 ## Mirror tallies of official Radix DAO votes
 
-For every Temperature Check and Proposal on the official Radix DAO Consultation App component,
-OTER can publish a document that reads the SAME on-chain ballots and tallies them twice: under the
-**official rule** — the Consultation App's own policy, which reproduces their published number and
-so proves the same ballots were read — and under the **OTER rule**, that platform's own
-`WEIGHT_RULE`. Both take ONE bar, the official vote's own: the absolute `quorum` and
-`approval_threshold` of its parameter set, plus the governance framework's Minimum Affirmative
-Support (MAS) and distinct-voter floor for that set. The DAO-controlled-funds bar
-(`excluded_accounts`) belongs to the OTER rule alone: the official vote has no such bar, so the
-official rule counts every ballot — a barred account's included — toward its totals, its
-`total_weight` and its voter count, exactly as the Consultation App does. Beyond that bar, the only
-thing the two results can disagree about is the weight function.
+For every Temperature Check, Proposal and Majority Judgment round on the official Radix DAO
+Consultation App component, OTER can publish a document that reads the SAME on-chain ballots and
+tallies them twice: under the **official rule** — the Consultation App's own policy, which
+reproduces their published number and so proves the same ballots were read — and under the
+**OTER rule**, that platform's own `WEIGHT_RULE`. A Temperature Check and a Proposal take ONE
+bar, the official vote's own: the absolute `quorum` and `approval_threshold` of its parameter
+set, plus the governance framework's Minimum Affirmative Support (MAS) and distinct-voter floor
+for that set. A Majority Judgment round takes its round's absolute `quorum` and the framework's
+`dao-election` percentages, and seats candidates rather than deciding an approval ratio. The
+DAO-controlled-funds bar (`excluded_accounts`) belongs to the OTER rule alone: the official vote
+has no such bar, so the official rule counts every ballot — a barred account's included — toward
+its totals, its `total_weight` and its voter count, exactly as the Consultation App does. Beyond
+that bar, the only thing the two results can disagree about is the weight function.
 
 The official component is the Radix DAO `Governance` 1.0.0 blueprint. Each vote carries its own
 snapshot of a **parameter set** (`id`, `label`, `version`, and a `Standard` or `MajorityJudgment`
-variant holding a `temperature_check` leg and, under `Standard`, a `proposal` leg); a vote's
-`quorum` and `approval_threshold` are read off its own leg. This verifier checks Temperature Check
-and Proposal mirrors. **Majority Judgment mirrors** (`ballot_source.kind`
-`majority_judgment_election` or `majority_judgment_election_rerun`) are refused as MALFORMED with
-"this verifier does not implement Majority Judgment mirror verification".
+variant holding a `temperature_check` leg and, under `Standard`, a `proposal` leg, and under
+`MajorityJudgment` an `election` leg); a Temperature Check or Proposal reads its `quorum` and
+`approval_threshold` off its own leg, and a Majority Judgment round reads its own round's
+`quorum`. This verifier checks all four kinds: Temperature Check, Proposal,
+`majority_judgment_election` and `majority_judgment_election_rerun`.
 
 ### What the official rule is
 
@@ -337,9 +364,9 @@ The Consultation App states it on `vote.radixdao.org/about/voting-power`. At the
 counts, and values in XRD:
 
 1. **direct XRD** — "1 XRD equals 1 vote";
-2. **validator LSUs** — "LSUs from every active Radix validator count for their underlying XRD
-   value". In practice the app counts every validator's LSUs, with no list and no activity
-   filter, and so does this verifier; the document's rule text says "the stake units of every
+2. **validator LSUs** — the stake units of every validator at their underlying XRD value. The
+   app's page says "active", but the rule as applied has no list and no activity filter, and
+   neither does this verifier; the document's rule text says "the stake units of every
    validator";
 3. **LSULP** — at its underlying liquid-staked XRD value;
 4. **a static allowlist of DEX liquidity positions** — "This is the current static allowlist used
@@ -381,7 +408,8 @@ the OTER-rule result exactly as an ordinary Poll would, plus one extra block:
 "ballot_source": {
   "mirror_doc_version": 3,
   "component": "component_rdx1…", "blueprint": "Governance",
-  "kind": "temperature_check" | "proposal", "official_id": 5,
+  "kind": "temperature_check" | "proposal"
+        | "majority_judgment_election" | "majority_judgment_election_rerun", "official_id": 5,
   "official_start": 1784999200, "official_deadline": 1785431200,
   "official_snapshot": 1784999200,
   "official_quorum": "402876916", "official_approval_threshold": "0.5",
@@ -406,17 +434,30 @@ the OTER-rule result exactly as an ordinary Poll would, plus one extra block:
                  "quorum_pc": "3", "mas_pc": "0", "min_unique_voters": 0,
                  "eligible_voting_power_derivation": "quorum * 100 / quorum_pc (…)",
                  "eligible_voting_power_bound": "33.333333333333333333" } | null,
-  "oter_register_scope": "full" | "network_independent"
+  "oter_register_scope": "full" | "network_independent",
+  "official_round": "RoundOne" | "Rerun",            // Majority Judgment only
+  "official_role_id": "rac-seat",                    // Majority Judgment only
+  "official_candidate_references": ["candidate-…"],   // Majority Judgment only
+  "official_tie_resolution": [2, 1, 0] | null          // Majority Judgment only
 }
 ```
 
-`official_snapshot` is the Instant the weight snapshot anchors to: a Temperature Check's own
-`snapshot` field, a Proposal's `start` (a Proposal carries no snapshot of its own).
+A Majority Judgment document is an Election: `kind` is `"Election"`, `seat_rule` is
+`"MajorityJudgment"`, `seats` is the election's seat count, `final_seats` is `0`,
+`withdrawn_excluded` is `[]`, `approve_weight` / `reject_weight` / `approved` / `mas_met` are
+null, and `winners` and `majority_judgment` carry the OTER leg's seating. Its
+`official_rule` gains `winners` and `majority_judgment` for the official leg, and publishes
+`totals_by_source` and `weight_delta_by_source` as null. The four `official_*` keys above are
+written on every Majority Judgment document, and a missing one is MALFORMED.
+
+`official_snapshot` is the Instant the weight snapshot anchors to: a Temperature Check's or a
+Majority Judgment round's own `snapshot` field, a Proposal's `start` (a Proposal carries no
+snapshot of its own).
 `official_outcome` and `official_continuation` are a Temperature Check's recorded result and what
 it was elevated to (`proposal` or `majority_judgment_election`); both are null on a Proposal.
 `official_max_selections` is a Proposal's `max_selections` (null when single choice, and on every
-Temperature Check). All six v3 keys are written on every v3 document; a missing one is MALFORMED,
-never read as null.
+Temperature Check and Majority Judgment round). Every v3 key is written on every v3 document; a
+missing one is MALFORMED, never read as null.
 
 `official_entry_state_version` is the state version at which the official entry was read: the
 entry's own `last_updated_at_state_version`. It is an integer on every v3 document, of every kind;
@@ -456,8 +497,11 @@ governance framework's Parameters Registry fixes each set's quorum and MAS as pe
 | `dao-constitutional` | 10 | 3.5 | 0 |
 | `dao-governance` | 7 | 2 | 0 |
 | `dao-treasury` | 7 | 1.5 | 50 |
+| `dao-election` | 7 | 0 | 0 |
 
-A Temperature Check is 3 % under every set, with no MAS and no floor. `eligible_voting_power =
+The `dao-election` row is the Majority Judgment election row, not a proposal row: a Proposal
+under that set gets no bar, and a round under any other set gets none either. A Temperature
+Check is 3 % under every set, with no MAS and no floor. `eligible_voting_power =
 quorum * 100 / quorum_pc` for the vote's own leg, and `min_affirmative_support = eligible * mas_pc
 / 100`. Because the DAO truncated its absolute quorums to whole XRD, the derived figure is a lower
 bound: the true one lies in `[derived, derived + 100/quorum_pc)`, and that width is published as
@@ -480,14 +524,18 @@ character (U+FEFF, U+0085, U+000B, U+00A0, …) is not one of the three words an
 nothing; any other label set, and any multi-select Proposal, publishes `approve_weight`,
 `reject_weight`, `mas_met` and `approved` as null. Abstain counts toward quorum (it is in
 `total_weight`) and toward `abstain_weight`, and stays outside the decisive share. Both legs apply
-the whole bar: the quorum, the at-or-above threshold, MAS, and the distinct-voter floor.
+the whole bar: the quorum, the at-or-above threshold, MAS, and the distinct-voter floor. A
+Majority Judgment round has no sides: its ballots grade every candidate, its outcome is a
+seating, and its `approve_weight` / `reject_weight` / `approved` / `mas_met` are null on both
+legs.
 
 `weight_delta_by_source` is **OTER-rule weight minus official-rule weight, per source**, over the
 accounts whose weight entered the OTER total. Every leg is zero on a source where the DAO's
 on-ledger register and the app's allowlist name the same positions — which, on mainnet as of the
 version shipped here, is all of them. The values are signed: positive where the register counts a
 position the allowlist does not, negative the other way round. There is no `liquid` leg, because a
-balance is not a listed source and both rules count it at par.
+balance is not a listed source and both rules count it at par. A Majority Judgment document
+publishes the delta as `null`: its official result is a seating, not an approval split.
 
 **Only `mirror_doc_version` 3 is checked; 1 and 2 are refused, not checked.** Version 1 documents
 state the official rule as liquid XRD only. Version 2 documents were read from the pre-1.0.0 flat
@@ -500,11 +548,11 @@ above, and a document carrying `ballot_source` gets seven checks instead of one:
 
 | Check | What it does | Where a mismatch is reported |
 |---|---|---|
-| **(a)** the ballots | Re-reads the official component's own state — `temperature_checks` / `proposals` key-value store → the entry named by `official_id`, at `official_entry_state_version` → its `voters` key-value store, at `ballot_state_version` — and compares every account's selection, plus the entry's own metadata, against what `ballot_source` claims: `quorum` / `approval_threshold` of its parameter-set leg, the set's `{id, label, version, variant}`, `start` / `deadline` / `vote_count` / `revote_count`, a Temperature Check's `snapshot`, `outcome` and `continuation`, a Proposal's `max_selections`, and a Proposal's on-chain option labels against the document's `options`. It also checks the weight snapshot's anchor: `snapshot_state_version` must equal the state version the Gateway's timestamp selector resolves the entry's snapshot Instant to (a Proposal's `start`) — see below | `ballot_source.(a) …`; the labels as `ballot_source.(a) options`; the anchor as `ballot_source.(a) snapshot_state_version` |
-| **(b)** the official rule | Checks `allowlist_version` / `allowlist_hash` against this package's own copy of the list, then recomputes the app's policy — direct XRD, every validator's LSUs, LSULP and the allowlisted positions — at `snapshot_state_version` with the same weight engine check (c) uses, handed the allowlist as its register; summed per option over every ballot, barred accounts included, and decided under the same bar and the same label sides as the OTER rule (quorum, threshold, MAS, voter floor); compared against the claimed totals, verdict and `totals_by_source` split | `ballot_source.(b) official_rule. …` |
+| **(a)** the ballots | Re-reads the official component's own state — `temperature_checks` / `proposals` / `majority_judgment_elections` key-value store → the entry named by `official_id`, at `official_entry_state_version` → its `voters` key-value store, at `ballot_state_version` — and compares every account's selection, plus the entry's own metadata, against what `ballot_source` claims: `quorum` / `approval_threshold` of its parameter-set leg, the set's `{id, label, version, variant}`, `start` / `deadline` / `vote_count` / `revote_count`, a Temperature Check's `snapshot`, `outcome` and `continuation`, a Proposal's `max_selections`, and the on-chain option labels against the document's `options`. A Majority Judgment round is read from its election's `round_one` / `rerun`, and its parameter set, candidates, `role_id` and seat count from the Temperature Check that carries them; `official_round`, `official_role_id`, `official_candidate_references`, `official_tie_resolution` and `seats` are compared too. It also checks the weight snapshot's anchor: `snapshot_state_version` must equal the state version the Gateway's timestamp selector resolves the entry's snapshot Instant to (a round's own `snapshot`, a Proposal's `start`) — see below | `ballot_source.(a) …`; the labels as `ballot_source.(a) options`; the anchor as `ballot_source.(a) snapshot_state_version` |
+| **(b)** the official rule | Checks `allowlist_version` / `allowlist_hash` against this package's own copy of the list, then recomputes the app's policy — direct XRD, every validator's LSUs, LSULP and the allowlisted positions — at `snapshot_state_version` with the same weight engine check (c) uses, handed the allowlist as its register; summed per option over every ballot, barred accounts included, and decided under the same bar and the same label sides as the OTER rule (quorum, threshold, MAS, voter floor); compared against the claimed totals, verdict and `totals_by_source` split. For a Majority Judgment round it recomputes the official leg's totals over valid ballots, its quorum, and its seating under the round's own floor, then compares `official_rule.winners` and `official_rule.majority_judgment` | `ballot_source.(b) official_rule. …` |
 | **(c)** the OTER rule | The ordinary v20 pipeline above, completely unchanged — this is why a mirror document's top-level fields are checked exactly as a Poll's would be | the usual unprefixed field names (`totals[…]`, `votes[…].weight`, `approved`, …) |
 | **(d)** the window | How many re-read ballots landed before the vote's own start or after its deadline, both bounds resolved from `official_start` / `official_deadline` via the Gateway's timestamp selector — see below | `ballot_source.(d) ballots_outside_window` |
-| **(e)** the weight delta | The per-source gap between the two rules — OTER-rule weight minus official-rule weight over the same participating accounts, both sides from the same weight engine over the same account set. Zero wherever the register and the allowlist agree; signed where they do not | `ballot_source.(e) weight_delta_by_source. …` |
+| **(e)** the weight delta | The per-source gap between the two rules — OTER-rule weight minus official-rule weight over the same participating accounts, both sides from the same weight engine over the same account set. Zero wherever the register and the allowlist agree; signed where they do not. A Majority Judgment round publishes no delta, and the check requires its claim to be null | `ballot_source.(e) weight_delta_by_source. …` |
 | **(f)** the framework bar | Re-derives eligible voting power, MAS and the voter floor from the RE-READ parameter-set id and quorum (never the document's) and compares them against the top-level `eligible_voting_power`, `min_affirmative_support` and `min_unique_voters`, and the framework row against `ballot_source.framework` | `ballot_source.(f) …` |
 | **(g)** the register scope | Expects `oter_register_scope` `"full"` exactly when the bech32 network of `ballot_source.component` equals the network of the registry whose set `weight_set_version` names, else `"network_independent"`; derives the applied register from that set (delegation off, and under `"network_independent"` every named leg off) and requires `weight_sources` to equal it canonically. The OTER leg in (c) and (e) is weighed under this derived register, never the document's, so no register address reaches the other network's gateway — see below | `ballot_source.(g) …` |
 
@@ -539,8 +587,9 @@ start, so a ballot cast between the two lies outside its window.
 
 **The snapshot anchor is checked through the same selector.** Both legs are weighed at the
 top-level `snapshot_state_version`, so that number decides every weight in the document. Check (a)
-resolves the entry's own snapshot Instant (a Temperature Check's `snapshot`, a Proposal's `start`)
-to a state version with the timestamp selector above and requires `snapshot_state_version` to equal
+resolves the entry's own snapshot Instant (a Temperature Check's or Majority Judgment round's
+`snapshot`, a Proposal's `start`) to a state version with the timestamp selector above and
+requires `snapshot_state_version` to equal
 it. A document weighed at any other state version — at a Temperature Check's `start` instead of its
 `snapshot`, say — is internally consistent and would otherwise recompute cleanly; this check names
 it as `ballot_source.(a) snapshot_state_version`. When the snapshot Instant is the start, the
@@ -607,7 +656,7 @@ of those ballots under today's rule rather than a reconstruction of the number p
 ```
 npm install && npm run build
 radix-tally-verify <tally.json | -> [--gateway URL] [--tally-hash HEX] [--xrd-resource ADDR]
-                  [--weight-set FILE]
+                  [--weight-set FILE] [--excluded-set FILE] [--hash-only]
 ```
 
 The input may be the bare document or the API envelope (`{"document": …, "document_hash_blake2b":
@@ -615,8 +664,8 @@ The input may be the bare document or the API envelope (`{"document": …, "docu
 (`mainnet` / `stokenet`), or pass `--xrd-resource` for anything else. For a mirror document, the
 gateway serves the official component's network.
 
-`--weight-set` supplies, for a mirror document, the weight-source set its `weight_set_version`
-names and the network of the registry that holds it:
+`--weight-set` supplies the weight-source set the document's `weight_set_version` names, and the
+network of the registry that holds it:
 
 ```json
 { "network": "mainnet" | "stokenet", "weight_set_version": 7,
@@ -625,7 +674,23 @@ names and the network of the registry that holds it:
 
 All three keys are required. `weight_sources` is in the shape a tally document carries; a file
 without it is refused rather than read as the default register. Every address it names must be on
-the declared network, or the file is refused.
+the declared network, or the file is refused. The document's version is checked against the
+file's, and its `weight_sources` against the register its `weight_config` derives from the set.
+For a mirror document the same file supplies the network check (g) needs.
+
+`--excluded-set` supplies the barred register `excluded_set_version` names:
+
+```json
+{ "excluded_set_version": 3, "excluded_accounts": [] }
+```
+
+The accounts must be in strictly ascending UTF-8 order, as the document's own register must be.
+The document's version and `excluded_accounts` are checked against the file.
+
+`--hash-only` skips the Gateway entirely: it prints `canonical=…` and `hash=…` for the input's
+document, and exits 0 (or 2 when `--tally-hash` was supplied and does not match). It is an
+encoding check, not a shape check, so an encoding vector that is not a whole tally document can be
+checked with it.
 
 Exit codes are the contract:
 
@@ -634,8 +699,8 @@ Exit codes are the contract:
 | 0 | **Match** — every figure recomputes exactly, and the hash agrees when one was supplied |
 | 1 | **Figures disagree** — the real signal |
 | 2 | **Serialization disagreement** — figures match, hash differs; a spec departure, not a lie |
-| 3 | **Unknown** — gateway unreachable or the pinned state version pruned |
-| 4 | **Malformed** — the input is not a readable tally document, or its own register names something the ledger says it is not |
+| 3 | **Unknown** — gateway unreachable or the pinned state version pruned, or an answer at another state or missing a required entity |
+| 4 | **Malformed** — the input is not a readable tally document, its own register names something the ledger says it is not, or a named source cannot be read |
 
 ## Running the tests
 
