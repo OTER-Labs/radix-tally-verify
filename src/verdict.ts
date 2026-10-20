@@ -545,7 +545,7 @@ export function majorityJudgmentJson(
  * difference between the two exclusions, and why they are two `continue`s and not one.
  *
  * The two compose in one direction only. A barred ballot is struck first and never reaches the
- * validity check, so it can never be reported invalid: it was not eligible to be judged, and
+ * validity check, so it can never be reported invalid: it was not eligible to be checked, and
  * naming it in `invalid_ballots` would accuse a voter of malformity on a ballot that was never
  * read.
  */
