@@ -331,7 +331,7 @@ grade.
 
 It is still **reported**, by index, in `majority_judgment.invalid_ballots` — which is the whole
 difference between an invalid ballot and a barred one. A barred ballot is struck first and never
-reaches the validity check, so it is never named there: it was not eligible to be judged, and an
+reaches the validity check, so it is never named there: it was not eligible to be checked, and an
 index in that list must not accuse a voter of malformity on a ballot nobody read.
 
 ## Mirror tallies of official Radix DAO votes

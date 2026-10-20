@@ -797,7 +797,7 @@ test("an empty MJ selection is invalid, so it is not the abstention it would be 
 
 test("a barred ballot that is ALSO invalid appears in neither the aggregates nor invalid_ballots", () => {
   // The bar is applied first and the ballot never reaches the validity check. Reporting it as
-  // invalid would accuse a voter of malformity on a ballot that was never eligible to be judged
+  // invalid would accuse a voter of malformity on a ballot that was never eligible to be checked
   // — and would put an index into `invalid_ballots` that names an excluded ballot.
   const grades = (g: number[]): number[] => g.map((x, c) => c * GRADES.length + x);
   const votes = [

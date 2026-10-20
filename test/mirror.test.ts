@@ -1137,7 +1137,7 @@ test("on-chain option labels listed out of id order are read in id order, and th
   assert.deepEqual(out, { kind: "match", hashChecked: true });
 });
 
-test("a document with Approve and Reject swapped differs on (a) options and is judged by the on-chain labels", async () => {
+test("a document with Approve and Reject swapped differs on (a) options and is decided by the on-chain labels", async () => {
   // Chain: ["Reject", "Abstain", "Approve"]. The document swaps the two decisive labels and
   // publishes the verdict those swapped labels give — approve 30 (option 0), reject 100 — which
   // is internally consistent, and the ballots still match by index. Deriving the sides from the
