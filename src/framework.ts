@@ -16,12 +16,22 @@ export const FRAMEWORK_SOURCE = "RadixDAO/governance-framework@470a047 Parameter
 export const ELIGIBLE_DERIVATION =
   "quorum * 100 / quorum_pc (the DAO's absolute quorums are truncated to whole XRD, so the true figure lies in [derived, derived + 100/quorum_pc))";
 
-const PROPOSAL_ROWS: Readonly<Record<string, { quorumPc: string; masPc: string; minUniqueVoters: number }>> = {
-  default: { quorumPc: "5", masPc: "1", minUniqueVoters: 0 },
-  "dao-constitutional": { quorumPc: "10", masPc: "3.5", minUniqueVoters: 0 },
-  "dao-governance": { quorumPc: "7", masPc: "2", minUniqueVoters: 0 },
-  "dao-treasury": { quorumPc: "7", masPc: "1.5", minUniqueVoters: 50 },
-};
+interface FrameworkRow {
+  quorumPc: string;
+  masPc: string;
+  minUniqueVoters: number;
+  /** The Majority Judgment election row: a Proposal under this set gets no bar, and a round
+   * under any other set gets none either. */
+  election: boolean;
+}
+
+const FRAMEWORK_ROWS: readonly (FrameworkRow & { id: string })[] = [
+  { id: "default", quorumPc: "5", masPc: "1", minUniqueVoters: 0, election: false },
+  { id: "dao-constitutional", quorumPc: "10", masPc: "3.5", minUniqueVoters: 0, election: false },
+  { id: "dao-governance", quorumPc: "7", masPc: "2", minUniqueVoters: 0, election: false },
+  { id: "dao-treasury", quorumPc: "7", masPc: "1.5", minUniqueVoters: 50, election: false },
+  { id: "dao-election", quorumPc: "7", masPc: "0", minUniqueVoters: 0, election: true },
+];
 const TEMPERATURE_CHECK_ROW = { quorumPc: "3", masPc: "0", minUniqueVoters: 0 };
 
 export interface Framework {
@@ -34,12 +44,14 @@ export interface Framework {
 }
 
 export function frameworkFor(kind: MirrorKind, setId: string | null, quorum: Dec): Framework | null {
+  const majorityJudgment =
+    kind === "majority_judgment_election" || kind === "majority_judgment_election_rerun";
   const row =
     kind === "temperature_check"
       ? TEMPERATURE_CHECK_ROW
-      : setId !== null && Object.hasOwn(PROPOSAL_ROWS, setId)
-        ? (PROPOSAL_ROWS[setId] ?? null)
-        : null;
+      : (FRAMEWORK_ROWS.find(
+          (r) => r.id === setId && r.election === majorityJudgment,
+        ) ?? null);
   if (row === null) return null;
   const hundred = Dec.fromInt(100);
   const quorumPc = Dec.parse(row.quorumPc);
@@ -85,6 +97,8 @@ function asciiLower(s: string): string {
  */
 export function decisionSides(kind: MirrorKind, options: string[], maxSelections: number | null): Sides | null {
   if (kind === "temperature_check") return { approve: 1, reject: 0, abstain: null };
+  // A Majority Judgment round has no approve/reject sides: its outcome is a seating.
+  if (kind === "majority_judgment_election" || kind === "majority_judgment_election_rerun") return null;
   if (maxSelections !== null) return null;
   const found: Record<string, number> = {};
   for (let i = 0; i < options.length; i++) {

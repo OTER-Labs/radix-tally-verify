@@ -123,6 +123,13 @@ export interface VerdictSpec {
    */
   gradeQuantile: GradeQuantile | null;
   /**
+   * The floor a Majority Judgment result was allocated under, as a `GRADES` ordinal. Absent is
+   * `MINIMUM_QUALIFYING_GRADE` ("Good"), which every ordinary election uses. A mirror of an
+   * official round passes the round's own `minimum_median_grade` here, exactly as it passes the
+   * document's Grade Quantile.
+   */
+  minimumQualifyingGrade?: number | undefined;
+  /**
    * The delegations in force at the snapshot — the document's `delegation_input` (v18), or
    * `null` when the leg was off.
    *
@@ -336,7 +343,7 @@ export function allocateSeatsSpav(
  * The empty ballot (an abstention elsewhere) is invalid here for the same reason: MJ has no
  * abstention.
  */
-function decodeMjBallot(selection: number[], candidateCount: number): number[] | null {
+export function decodeMjBallot(selection: number[], candidateCount: number): number[] | null {
   if (selection.length !== candidateCount) return null;
   const grades: number[] = new Array<number>(candidateCount).fill(-1);
   for (const raw of selection) {
@@ -400,6 +407,7 @@ export function allocateSeatsMajorityJudgment(
   seats: number,
   excluded: number[],
   quantile: GradeQuantile = THREE_FIFTHS,
+  minimumQualifyingGrade: number = MINIMUM_QUALIFYING_GRADE,
 ): MjResult {
   const byGrade: Dec[][] = [];
   for (let c = 0; c < candidateCount; c++) byGrade.push(new Array<Dec>(GRADES.length).fill(Dec.ZERO));
@@ -433,7 +441,7 @@ export function allocateSeatsMajorityJudgment(
   const gaugeClass = (c: MjCandidate): number => c.above.gt(c.below) ? 0 : c.above.eq(c.below) ? 1 : 2;
 
   const ranked = candidates.filter(
-    (c) => !excluded.includes(c.candidateIndex) && c.qualifying !== null && c.qualifying <= MINIMUM_QUALIFYING_GRADE,
+    (c) => !excluded.includes(c.candidateIndex) && c.qualifying !== null && c.qualifying <= minimumQualifyingGrade,
   );
   ranked.sort((a, b) => {
     const byQualifying = (a.qualifying as number) - (b.qualifying as number);
@@ -484,10 +492,14 @@ export function allocateSeatsMajorityJudgment(
  * carry would report every pre-v15 election as a figure difference — the field is absent there
  * because the engine of that vintage did not write it, not because anything disagrees.
  */
-function majorityJudgmentJson(r: MjResult, published: GradeQuantile | null): Json {
+export function majorityJudgmentJson(
+  r: MjResult,
+  published: GradeQuantile | null,
+  minimumQualifyingGrade: number = MINIMUM_QUALIFYING_GRADE,
+): Json {
   return {
     grades: [...GRADES],
-    minimum_qualifying_grade: GRADES[MINIMUM_QUALIFYING_GRADE] as string,
+    minimum_qualifying_grade: GRADES[minimumQualifyingGrade] as string,
     ...(published === null
       ? {}
       : {
@@ -677,6 +689,7 @@ export function deriveFigures(
   let majorityJudgment: Json = null;
   if (election && quorumMet) {
     if (useMj) {
+      const floor = spec.minimumQualifyingGrade ?? MINIMUM_QUALIFYING_GRADE;
       const mj = allocateSeatsMajorityJudgment(
         ballots,
         candidateCount,
@@ -685,9 +698,11 @@ export function deriveFigures(
         // The document's own fraction, or three-fifths when it publishes none. Never a constant
         // chosen here over one the document states.
         spec.gradeQuantile ?? THREE_FIFTHS,
+        // And its own floor: a round's `minimum_median_grade` is set per round.
+        floor,
       );
       winners = mj.winners;
-      majorityJudgment = majorityJudgmentJson(mj, spec.gradeQuantile);
+      majorityJudgment = majorityJudgmentJson(mj, spec.gradeQuantile, floor);
     } else if (spec.seatRule === "Spav") {
       winners = allocateSeatsSpav(ballots, candidateCount, spec.seats, spec.excluded);
     } else {

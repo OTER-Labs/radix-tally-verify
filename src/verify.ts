@@ -16,14 +16,15 @@ import type { Json } from "./canonical.ts";
 import { WeightRuleError } from "./concentrated.ts";
 import { Dec } from "./decimal.ts";
 import { DocumentError, parseTallyDocument } from "./document.ts";
-import type { PinnedWeightSet, TallyDocument } from "./document.ts";
+import type { PinnedExcludedSet, PinnedWeightSet, TallyDocument } from "./document.ts";
 import type { Sides } from "./framework.ts";
 import { GatewayError } from "./gateway.ts";
 import type { GatewayClient } from "./gateway.ts";
 import { checkRegisterScope, verifyMirrorBallots } from "./mirror.ts";
 import { deriveFigures } from "./verdict.ts";
 import type { DerivedFigures } from "./verdict.ts";
-import { assetSymbolFor, computeAccountWeights } from "./weights.ts";
+import { assetSymbolFor, computeAccountWeights, serializeWeightSources } from "./weights.ts";
+import { spaceRegisterProblem, weightRuleText, weightSourcesForSpace } from "./weight-rule.ts";
 
 export interface Difference {
   field: string;
@@ -186,6 +187,13 @@ export interface VerifyOptions {
    * in for the set.
    */
   weightSet?: PinnedWeightSet;
+  /**
+   * The excluded set `excluded_set_version` names. With it, the version and the embedded
+   * `excluded_accounts` list are checked against the registry's set; without it, both are
+   * carried and hashed but not checked (the registry is a different source from the Gateway
+   * endpoints this tool reads).
+   */
+  excludedSet?: PinnedExcludedSet;
 }
 
 export async function verifyTallyDocument(
@@ -204,6 +212,45 @@ export async function verifyTallyDocument(
     throw e;
   }
   const hash = expectedHash ?? envelopeHash;
+
+  // Structural consistency that needs no Gateway: the rule text the document states, the
+  // register its space implies, and — when the caller supplied the registry's sets — the
+  // versions and the sets those versions name.
+  const consistencyDifferences: Difference[] = [];
+  const checkConsistent = (field: string, document: string, recomputed: string): void => {
+    if (document !== recomputed) consistencyDifferences.push({ field, document, recomputed });
+  };
+  // The equality is a v22 rule: that is the version whose `weight_rule` the current text
+  // describes. An older document states the rule of its own vintage, which is legitimately not
+  // today's text and is still committed by the hash.
+  if (doc.tallyDocVersion !== null && doc.tallyDocVersion >= 22 && doc.weightRule !== null) {
+    checkConsistent("weight_rule", doc.weightRule, weightRuleText(doc.weightConfig));
+  }
+  const registerProblem = spaceRegisterProblem(doc.weightConfig, doc.weightSources);
+  if (registerProblem !== null) {
+    consistencyDifferences.push({
+      field: "weight_sources",
+      document: registerProblem,
+      recomputed: `the register ${doc.weightConfig.kind} implies`,
+    });
+  }
+  if (options.weightSet !== undefined && !doc.isMirror) {
+    checkConsistent("weight_set_version", String(doc.weightSetVersion), String(options.weightSet.version));
+    const expected = weightSourcesForSpace(doc.weightConfig, options.weightSet.sources);
+    checkConsistent(
+      "weight_sources",
+      canonicalize(serializeWeightSources(doc.weightSources) as unknown as Json),
+      canonicalize(serializeWeightSources(expected) as unknown as Json),
+    );
+  }
+  if (options.excludedSet !== undefined) {
+    checkConsistent("excluded_set_version", String(doc.excludedSetVersion), String(options.excludedSet.version));
+    checkConsistent(
+      "excluded_accounts",
+      canonicalize(doc.excludedAccounts),
+      canonicalize(options.excludedSet.accounts),
+    );
+  }
 
   let mirrorDifferences: Difference[] = [];
   let assetSymbolDifferences: Difference[] = [];
@@ -273,6 +320,7 @@ export async function verifyTallyDocument(
         excluded: doc.withdrawnExcluded ?? [],
         excludedAccounts: doc.excludedAccounts,
         gradeQuantile: doc.gradeQuantile,
+        minimumQualifyingGrade: doc.minimumQualifyingGrade,
         delegationInput: doc.delegationInput,
         tallyDocVersion: doc.tallyDocVersion,
         // A mirror's `min_affirmative_support` and `min_unique_voters` are the document's own;
@@ -300,7 +348,12 @@ export async function verifyTallyDocument(
     throw e;
   }
 
-  const differences = [...mirrorDifferences, ...assetSymbolDifferences, ...compareFigures(doc, derived)];
+  const differences = [
+    ...consistencyDifferences,
+    ...mirrorDifferences,
+    ...assetSymbolDifferences,
+    ...compareFigures(doc, derived),
+  ];
   if (differences.length > 0) return { kind: "figures", differences };
 
   // Figures agree. Only now does the byte-level question matter: is the document's canonical

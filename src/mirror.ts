@@ -92,10 +92,33 @@ import { GatewayError, asArray, asObject, asString } from "./gateway.ts";
 import type { GatewayClient } from "./gateway.ts";
 import { stateField } from "./concentrated.ts";
 import { WeightRuleError } from "./concentrated.ts";
-import { bindingApproved } from "./verdict.ts";
+import {
+  GRADES,
+  THREE_FIFTHS,
+  allocateSeatsMajorityJudgment,
+  bindingApproved,
+  decodeMjBallot,
+  majorityJudgmentJson,
+} from "./verdict.ts";
+import type { Ballot, GradeQuantile } from "./verdict.ts";
 import { computeAccountWeightBreakdown, networkOf, registerAddresses, serializeWeightSources } from "./weights.ts";
 import type { WeightBreakdown, WeightSources } from "./weights.ts";
 import type { Difference } from "./verify.ts";
+
+/**
+ * The official rule, in the document's own words — the sentence every v3 mirror carries in
+ * `ballot_source.official_rule.rule`. It is inside the hash, so a document that paraphrased it
+ * would commit a different sentence than the one its author published.
+ */
+export const OFFICIAL_RULE_TEXT =
+  "The Radix DAO Consultation App's own rule at snapshot_state_version: direct XRD at par, plus " +
+  "the stake units of every validator at their underlying XRD value, plus LSULP at its " +
+  "underlying liquid-staked XRD value, plus the XRD, LSU and LSULP side of each position on the " +
+  "app's static DEX allowlist (Ociswap V1/V2 precision receipts and Basic/Flex pool units, " +
+  "CaviarNine Simple/HLP pool units and Shape receipts, DefiPlaza Base/Quote pool units) — the " +
+  "allowlist identified by allowlist_version and allowlist_hash below. The other token in a pair " +
+  "adds no voting power. Voters only: no delegation, and none of this platform's own charter " +
+  "bar, which that vote does not have.";
 
 /** Keys per `/state/key-value-store/data` request; pages per `/state/key-value-store/keys` walk. */
 const KVS_DATA_CHUNK = 100;
@@ -103,7 +126,26 @@ const MAX_KVS_PAGES = 500;
 
 /** `ballot_source.kind` -> the component's own field name for that register. */
 function kvsFieldFor(kind: MirrorKind): string {
-  return kind === "temperature_check" ? "temperature_checks" : "proposals";
+  switch (kind) {
+    case "temperature_check":
+      return "temperature_checks";
+    case "proposal":
+      return "proposals";
+    case "majority_judgment_election":
+    case "majority_judgment_election_rerun":
+      return "majority_judgment_elections";
+  }
+}
+
+/** The round name a Majority Judgment kind mirrors. */
+function roundNameFor(kind: MirrorKind): "RoundOne" | "Rerun" | null {
+  if (kind === "majority_judgment_election") return "RoundOne";
+  if (kind === "majority_judgment_election_rerun") return "Rerun";
+  return null;
+}
+
+function isMjKind(kind: MirrorKind): boolean {
+  return kind === "majority_judgment_election" || kind === "majority_judgment_election_rerun";
 }
 
 /** One `field_name` out of a Tuple/Struct-shaped `programmatic_json` node. */
@@ -201,8 +243,24 @@ export interface OfficialEntry {
   /** A Proposal's `max_selections`; `null` when single choice, and on every Temperature Check. */
   maxSelections: number | null;
   /** A Proposal's `vote_options` labels, verbatim, in `ProposalVoteOptionId` order — the order
-   * its ballots index; `null` on a Temperature Check, whose sides are fixed. */
+   * its ballots index; `null` on a Temperature Check, whose sides are fixed. On a Majority
+   * Judgment round, the candidates' display names in id order. */
   voteOptions: string[] | null;
+  /** The `last_updated_at_state_version` the entry carried at the read, so a document's
+   * `official_entry_state_version` can be checked against it. */
+  lastUpdatedAtStateVersion: number | null;
+  /** Majority Judgment only: which round the entry held. */
+  round: "RoundOne" | "Rerun" | null;
+  /** Majority Judgment only: the election's role id and candidate references, in id order. */
+  roleId: string | null;
+  candidateReferences: string[] | null;
+  /** Majority Judgment only: the recorded tie order for this round, or null. */
+  tieResolution: number[] | null;
+  /** Majority Judgment only: the round's minimum median grade, as a `GRADES` ordinal — the
+   * floor both legs are allocated under. */
+  minimumGradeIndex: number | null;
+  /** Majority Judgment only: the seat count the election's Temperature Check declares. */
+  seats: number | null;
 }
 
 /**
@@ -261,11 +319,277 @@ function scalarInt(node: unknown, what: string): number {
   return Number(s);
 }
 
+/** The official `Grade` variants by ordinal: Poor = 0 … Excellent = 4. This platform's
+ * `GRADES` run the other way (Excellent = 0), so the ordinal is reversed once, here. */
+const OFFICIAL_GRADE_NAMES = ["Poor", "Acceptable", "Good", "VeryGood", "Excellent"] as const;
+
+/** An official grade enum's score, only when `variant_id` and `variant_name` agree. A
+ * disagreement is refused rather than resolved by either half. */
+function officialGradeScore(node: unknown, what: string): number {
+  const o = asObject(node);
+  const idRaw = asString(o["variant_id"]) ?? (typeof o["variant_id"] === "number" ? String(o["variant_id"]) : null);
+  const name = asString(o["variant_name"]);
+  if (idRaw === null || !/^\d+$/.test(idRaw)) {
+    throw new WeightRuleError(`${what} has no readable grade variant_id`);
+  }
+  const score = Number(idRaw);
+  if (OFFICIAL_GRADE_NAMES[score] !== name) {
+    throw new WeightRuleError(
+      `${what} grade variant_id ${idRaw} and variant_name ${JSON.stringify(name)} disagree`,
+    );
+  }
+  return score;
+}
+
+/** An official grade name -> this platform's `GRADES` ordinal. */
+export function officialGradeIndex(name: string): number | null {
+  const score = (OFFICIAL_GRADE_NAMES as readonly string[]).indexOf(name);
+  return score < 0 ? null : GRADES.length - 1 - score;
+}
+
+/** A `U32` newtype element, whether the Gateway renders the scalar bare or one level down. */
+function optionIndex(node: unknown): number | null {
+  const o = asObject(node);
+  const raw = asString(o["value"]);
+  if (raw !== null) {
+    if (!/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw))) return null;
+    return Number(raw);
+  }
+  const inner = asArray(o["fields"])[0];
+  return inner === undefined ? null : optionIndex(inner);
+}
+
+/**
+ * `MajorityJudgmentVoterEntry.grades`: `(candidate_id, official score)` pairs -> a selection in
+ * the tally's `candidate * 5 + grade` space, sorted. This is the whole ordinal reversal — this
+ * platform's index 0 is Excellent, the official score 4 is. Duplicates and missing candidates
+ * are left to the tally's validity rule, so an invalid ballot is still reported rather than
+ * dropped here.
+ */
+function decodeMjSelection(value: unknown, field: string): number[] {
+  const grades = tupleField(value, "grades");
+  if (grades === null) throw new WeightRuleError(`${field} has no readable grades field`);
+  const out: number[] = [];
+  for (const element of asArray(grades["elements"])) {
+    const candidateNode = tupleField(element, "candidate_id");
+    if (candidateNode === null) throw new WeightRuleError(`${field} grade has no candidate_id`);
+    const candidate = optionIndex(candidateNode);
+    if (candidate === null) throw new WeightRuleError(`${field} candidate_id does not parse as U32`);
+    const gradeNode = tupleField(element, "grade");
+    if (gradeNode === null) throw new WeightRuleError(`${field} grade has no grade field`);
+    const score = officialGradeScore(gradeNode, `${field} candidate ${candidate}`);
+    out.push(candidate * GRADES.length + (GRADES.length - 1 - score));
+  }
+  return out.sort((a, b) => a - b);
+}
+
 /** One ballot, re-read from the `voters` key-value store at `ballot_state_version`. */
 export interface OfficialBallot {
   account: string;
   selection: number[];
   lastUpdatedAtStateVersion: number | null;
+}
+
+/** A KVS data entry's own `last_updated_at_state_version`, or null when it carries none. */
+function entryStateVersion(entry: unknown): number | null {
+  const raw = asObject(entry)["last_updated_at_state_version"];
+  if (typeof raw === "number" && Number.isSafeInteger(raw)) return raw;
+  if (typeof raw === "string" && /^\d+$/.test(raw) && Number.isSafeInteger(Number(raw))) {
+    return Number(raw);
+  }
+  return null;
+}
+
+/** Locate one entry in a KVS by its U64 key, returning the key node the data read needs. */
+async function findKvsEntryKey(
+  gw: GatewayClient,
+  kvsAddress: string,
+  id: number,
+  stateVersion: number,
+  what: string,
+): Promise<unknown> {
+  const keys = await pageKvsKeys(gw, kvsAddress, stateVersion, what);
+  const matched = keys.find((k) => {
+    const v = asString(asObject(k)["value"]);
+    return v !== null && /^\d+$/.test(v) && Number(v) === id;
+  });
+  if (matched === undefined) {
+    throw new WeightRuleError(`no ${what} entry ${id} exists in ${kvsAddress} at sv ${stateVersion}`);
+  }
+  return matched;
+}
+
+/** The `programmatic_json` value of one KVS entry, refused when the read carries none. */
+async function readKvsEntryValue(
+  gw: GatewayClient,
+  kvsAddress: string,
+  key: unknown,
+  stateVersion: number,
+  what: string,
+): Promise<{ value: unknown; stateVersion: number | null }> {
+  const resp = asObject(await gw.keyValueStoreData(kvsAddress, [{ key_json: key }], stateVersion));
+  const message = asString(resp["message"]);
+  if (message !== null) {
+    throw new GatewayError(`gateway refused ${what} data of ${kvsAddress} at sv ${stateVersion}: ${message}`);
+  }
+  const entry = asArray(resp["entries"])[0];
+  if (entry === undefined) {
+    throw new WeightRuleError(`${what} of ${kvsAddress} has no value at sv ${stateVersion}`);
+  }
+  return {
+    value: asObject(asObject(entry)["value"])["programmatic_json"],
+    stateVersion: entryStateVersion(entry),
+  };
+}
+
+/**
+ * One Majority Judgment round's entry: `majority_judgment_elections` -> the election named by
+ * `official_id` -> the `round_one` / `rerun` it holds. The election carries no parameter set of
+ * its own: the round's parameter set, candidates, role and seat count come from the Temperature
+ * Check the election names, exactly as the official component's own schema splits them.
+ *
+ * The round's own fields are the vote's: snapshot, window, quorum, minimum median grade, voters
+ * and counts. Its `minimum_median_grade` is the floor both legs are allocated under, which is
+ * why it is decoded here rather than assumed to be "Good".
+ */
+async function readMjEntry(
+  gw: GatewayClient,
+  componentItem: Record<string, unknown>,
+  election: unknown,
+  kind: MirrorKind,
+  officialId: number,
+  stateVersion: number,
+  field: string,
+  blueprint: string,
+  lastUpdatedAtStateVersion: number | null,
+): Promise<OfficialEntry> {
+  const roundName = roundNameFor(kind) as "RoundOne" | "Rerun";
+  const roundField = roundName === "RoundOne" ? "round_one" : "rerun";
+  const round = optionInner(election, roundField, field);
+  if (round === null) {
+    throw new WeightRuleError(`${field} holds no ${roundField}`);
+  }
+  const minimumGradeNode = tupleField(round, "minimum_median_grade");
+  if (minimumGradeNode === null) {
+    throw new WeightRuleError(`${field} ${roundField} has no readable minimum_median_grade`);
+  }
+  const gradeName = asString(minimumGradeNode["variant_name"]);
+  if (gradeName === null) {
+    throw new WeightRuleError(`${field} ${roundField} minimum_median_grade is not a grade`);
+  }
+  // Decode the grade as an official enum first: id and name must agree.
+  officialGradeScore(minimumGradeNode, `${field} ${roundField} minimum_median_grade`);
+  const minimumGradeIndex = officialGradeIndex(gradeName);
+  if (minimumGradeIndex === null) {
+    throw new WeightRuleError(`${field} ${roundField} minimum_median_grade ${JSON.stringify(gradeName)} is not a grade`);
+  }
+
+  const votersKvsAddress = tupleFieldString(round, "voters");
+  if (votersKvsAddress === null) {
+    throw new WeightRuleError(`${field} ${roundField} has no readable voters field`);
+  }
+
+  // The election's tie resolution names the round it applies to.
+  const tieInner = optionInner(election, "tie_resolution", field);
+  let tieResolution: number[] | null = null;
+  if (tieInner !== null) {
+    const roundNode = tupleField(tieInner, "round");
+    const tieRound = roundNode === null ? null : asString(roundNode["variant_name"]);
+    if (tieRound !== "RoundOne" && tieRound !== "Rerun") {
+      throw new WeightRuleError(`${field} tie_resolution.round is ${JSON.stringify(tieRound)}`);
+    }
+    if (tieRound === roundName) {
+      const idsField = tupleField(tieInner, "ordered_candidate_ids");
+      if (idsField === null) {
+        throw new WeightRuleError(`${field} tie_resolution has no ordered_candidate_ids`);
+      }
+      tieResolution = asArray(idsField["elements"]).map((element, i) => {
+        const id = optionIndex(element);
+        if (id === null) {
+          throw new WeightRuleError(`${field} tie_resolution.ordered_candidate_ids[${i}] does not parse as U32`);
+        }
+        return id;
+      });
+    }
+  }
+
+  // The Temperature Check the election was opened from: text, parameter set, candidates, role
+  // and seat count. It carries the MajorityJudgment parameter-set variant.
+  const temperatureCheckId = tupleFieldInt(election, "temperature_check_id", field);
+  const tcKvs = stateField(componentItem, "temperature_checks");
+  if (tcKvs === null) {
+    throw new WeightRuleError(`component state has no temperature_checks field for election ${officialId}`);
+  }
+  const tcKey = await findKvsEntryKey(gw, tcKvs, temperatureCheckId, stateVersion, "temperature_checks");
+  const tc = await readKvsEntryValue(gw, tcKvs, tcKey, stateVersion, "temperature_checks");
+  const tcField = `${field} temperature_check ${temperatureCheckId}`;
+
+  const set = tupleField(tc.value, "parameter_set");
+  if (set === null) throw new WeightRuleError(`${tcField} has no readable parameter_set field`);
+  const params = enumNode(set, "parameters");
+  if (params === null || params.variant !== "MajorityJudgment") {
+    throw new WeightRuleError(`${tcField}: parameter_set.parameters is not MajorityJudgment`);
+  }
+  const setId = tupleFieldString(set, "id");
+  const setLabel = tupleFieldString(set, "label");
+  if (setId === null) throw new WeightRuleError(`${tcField} has no readable parameter_set.id field`);
+  if (setLabel === null) throw new WeightRuleError(`${tcField} has no readable parameter_set.label field`);
+
+  const follow = enumNode(tc.value, "follow_up");
+  if (follow === null || follow.variant !== "MajorityJudgmentElection") {
+    throw new WeightRuleError(`${tcField}: follow_up is not MajorityJudgmentElection`);
+  }
+  const roleId = tupleFieldString(follow.fields, "role_id");
+  if (roleId === null) throw new WeightRuleError(`${tcField} follow_up has no readable role_id`);
+  const seatCount = tupleFieldInt(follow.fields, "seat_count", `${tcField} follow_up`);
+  const candidatesField = tupleField(follow.fields, "candidates");
+  if (candidatesField === null) {
+    throw new WeightRuleError(`${tcField} follow_up has no readable candidates`);
+  }
+  const candidates: Array<{ id: number; name: string; reference: string }> = [];
+  for (const [index, element] of asArray(candidatesField["elements"]).entries()) {
+    const id = optionIndex(tupleField(element, "id"));
+    const name = tupleFieldString(element, "display_name");
+    const reference = tupleFieldString(element, "reference");
+    if (id === null || name === null || reference === null) {
+      throw new WeightRuleError(`${tcField} follow_up.candidates[${index}] is not readable`);
+    }
+    candidates.push({ id, name, reference });
+  }
+  candidates.sort((a, b) => a.id - b.id);
+  if (candidates.some((candidate, i) => candidate.id !== i)) {
+    throw new WeightRuleError(`${tcField} follow_up.candidates: ids do not run 0..${candidates.length - 1}`);
+  }
+
+  return {
+    blueprint,
+    votersKvsAddress,
+    parameterSet: {
+      id: setId,
+      label: setLabel,
+      version: tupleFieldInt(set, "version", `${tcField} parameter_set`),
+      variant: "MajorityJudgment",
+    },
+    quorum: tupleFieldDec(round, "quorum", `${field} ${roundField}`),
+    // Majority Judgment has no approval threshold; the document publishes "0".
+    approvalThreshold: Dec.ZERO,
+    snapshot: tupleFieldInt(round, "snapshot", `${field} ${roundField}`),
+    start: tupleFieldInt(round, "start", `${field} ${roundField}`),
+    deadline: tupleFieldInt(round, "deadline", `${field} ${roundField}`),
+    voteCount: tupleFieldInt(round, "vote_count", `${field} ${roundField}`),
+    revoteCount: tupleFieldInt(round, "revote_count", `${field} ${roundField}`),
+    outcome: null,
+    continuation: null,
+    maxSelections: null,
+    voteOptions: candidates.map((candidate) => candidate.name),
+    lastUpdatedAtStateVersion,
+    round: roundName,
+    roleId,
+    candidateReferences: candidates.map((candidate) => candidate.reference),
+    tieResolution,
+    minimumGradeIndex,
+    seats: seatCount,
+  };
 }
 
 /**
@@ -334,6 +658,21 @@ export async function readOfficialEntry(
   }
   const value = asObject(asObject(entry)["value"])["programmatic_json"];
   const field = `${kind} ${officialId} of ${component}`;
+  const lastUpdatedAtStateVersion = entryStateVersion(entry);
+
+  if (isMjKind(kind)) {
+    return readMjEntry(
+      gw,
+      item,
+      value,
+      kind,
+      officialId,
+      stateVersion,
+      field,
+      blueprint,
+      lastUpdatedAtStateVersion,
+    );
+  }
 
   const votersKvsAddress = tupleFieldString(value, "voters");
   if (votersKvsAddress === null) {
@@ -408,6 +747,13 @@ export async function readOfficialEntry(
       continuation,
       maxSelections: null,
       voteOptions: null,
+      lastUpdatedAtStateVersion,
+      round: null,
+      roleId: null,
+      candidateReferences: null,
+      tieResolution: null,
+      minimumGradeIndex: null,
+      seats: null,
     };
   }
 
@@ -419,6 +765,13 @@ export async function readOfficialEntry(
     continuation: null,
     maxSelections: maxInner === null ? null : scalarInt(maxInner, `${field} max_selections`),
     voteOptions: readVoteOptions(value, field),
+    lastUpdatedAtStateVersion,
+    round: null,
+    roleId: null,
+    candidateReferences: null,
+    tieResolution: null,
+    minimumGradeIndex: null,
+    seats: null,
   };
 }
 
@@ -447,6 +800,7 @@ function decodeSelection(value: unknown, kind: MirrorKind, field: string): numbe
     if (variantId === 1) return [0]; // Against -> Poll option index 0
     throw new WeightRuleError(`${field} vote variant is neither For nor Against`);
   }
+  if (isMjKind(kind)) return decodeMjSelection(value, field);
   const options = tupleField(value, "options");
   if (options === null) throw new WeightRuleError(`${field} has no readable options field`);
   const out: number[] = [];
@@ -582,6 +936,58 @@ function officialRuleFigures(
           true, // mirror documents are always tally_doc_version 20+: inclusive comparison
         );
   return { totals, totalWeight, quorumMet, approved };
+}
+
+/**
+ * The official leg of a Majority Judgment round, in the Election's own shape: the raw
+ * per-(candidate, grade) totals over VALID ballots only, participation and quorum over valid
+ * ballots only, and — when quorum is met — the seating under the round's own floor.
+ *
+ * An invalid ballot still reaches the allocator, because the allocator is what reports it in
+ * `invalid_ballots`; it reaches no grade, no total, no participation and no voter count. The
+ * official vote has no `excluded_accounts` bar, so every ballot is in the allocator's input.
+ */
+function officialMjFigures(
+  ballots: Ballot[],
+  optionCount: number,
+  seats: number,
+  quorum: Dec,
+  minUniqueVoters: number,
+  quantile: GradeQuantile,
+  floor: number,
+): {
+  totals: Dec[];
+  totalWeight: Dec;
+  quorumMet: boolean;
+  winners: number[] | null;
+  majorityJudgment: Json;
+} {
+  const candidateCount = optionCount / GRADES.length;
+  const totals: Dec[] = Array.from({ length: optionCount }, () => Dec.ZERO);
+  let totalWeight = Dec.ZERO;
+  let voters = 0;
+  for (const ballot of ballots) {
+    const weight = ballot.weight;
+    if (decodeMjBallot(ballot.selection, candidateCount) === null) continue;
+    voters++;
+    totalWeight = totalWeight.add(weight);
+    for (const idx of ballot.selection) {
+      const t = totals[idx];
+      if (t !== undefined) totals[idx] = t.add(weight);
+    }
+  }
+  const quorumMet = totalWeight.gte(quorum) && voters >= minUniqueVoters;
+  if (!quorumMet) {
+    return { totals, totalWeight, quorumMet, winners: null, majorityJudgment: null };
+  }
+  const result = allocateSeatsMajorityJudgment(ballots, candidateCount, seats, [], quantile, floor);
+  return {
+    totals,
+    totalWeight,
+    quorumMet,
+    winners: result.winners,
+    majorityJudgment: majorityJudgmentJson(result, quantile, floor),
+  };
 }
 
 /**
@@ -767,6 +1173,16 @@ export async function verifyMirrorBallots(
   // entry as it stood then carries neither.
   const entry = await readOfficialEntry(gw, bs.component, bs.kind, bs.officialId, bs.officialEntryStateVersion);
   check("ballot_source.(a) blueprint", bs.blueprint, entry.blueprint);
+  // The version the document names is the entry's own last write, not merely the version the
+  // read was pinned to: a read at a later state answers with the same entry and the same data,
+  // so only the entry's own field can say whether the document's claim is true.
+  if (entry.lastUpdatedAtStateVersion !== null) {
+    check(
+      "ballot_source.(a) official_entry_state_version",
+      String(bs.officialEntryStateVersion),
+      String(entry.lastUpdatedAtStateVersion),
+    );
+  }
   check("ballot_source.(a) official_quorum", bs.officialQuorum.toString(), entry.quorum.toString());
   check(
     "ballot_source.(a) official_approval_threshold",
@@ -787,6 +1203,21 @@ export async function verifyMirrorBallots(
   // swapped would otherwise re-derive its own inverted verdict and agree with itself.
   if (entry.voteOptions !== null) {
     check("ballot_source.(a) options", canonicalize(doc.options), canonicalize(entry.voteOptions));
+  }
+  if (isMjKind(bs.kind)) {
+    check("ballot_source.(a) official_round", String(bs.officialRound), String(entry.round));
+    check("ballot_source.(a) official_role_id", String(bs.officialRoleId), String(entry.roleId));
+    check(
+      "ballot_source.(a) official_candidate_references",
+      canonicalize(bs.officialCandidateReferences as unknown as Json),
+      canonicalize(entry.candidateReferences as unknown as Json),
+    );
+    check(
+      "ballot_source.(a) official_tie_resolution",
+      canonicalize(bs.officialTieResolution as unknown as Json),
+      canonicalize(entry.tieResolution as unknown as Json),
+    );
+    check("ballot_source.(a) seats", String(doc.seats), String(entry.seats));
   }
   const sides = decisionSides(bs.kind, entry.voteOptions ?? [], bs.officialMaxSelections);
 
@@ -831,6 +1262,7 @@ export async function verifyMirrorBallots(
   // under a list this verifier does not carry is not wrong, it is unverifiable here, and saying
   // so by name is more use than a wall of totals differences.
   const allowlist = officialAllowlistFor(bs.component);
+  check("ballot_source.(b) official_rule.rule", bs.officialRule.rule, OFFICIAL_RULE_TEXT);
   check("ballot_source.(b) official_rule.allowlist_version", bs.officialRule.allowlistVersion, allowlist.version);
   check("ballot_source.(b) official_rule.allowlist_hash", bs.officialRule.allowlistHash, allowlist.hash);
 
@@ -846,43 +1278,101 @@ export async function verifyMirrorBallots(
   const officialWeights = new Map(
     accounts.map((a) => [a, officialBreakdown.get(a)?.total ?? Dec.ZERO]),
   );
-  const publishedBallots = new Map(doc.votes.map((v) => [v.account, v.selection]));
-  // The official threshold is a fraction (0.5); the bar compares against a percentage.
-  const official = officialRuleFigures(
-    publishedBallots,
-    officialWeights,
-    doc.totals.length,
-    bs.officialQuorum,
-    bs.officialApprovalThreshold.mul(Dec.fromInt(100)),
-    framework === null ? null : sides,
-    framework?.mas ?? Dec.ZERO,
-    framework?.minUniqueVoters ?? 0,
-  );
-  for (let i = 0; i < Math.max(official.totals.length, bs.officialRule.totals.length); i++) {
-    check(
-      `ballot_source.(b) official_rule.totals[${i}]`,
-      decStr(bs.officialRule.totals[i]),
-      decStr(official.totals[i]),
+  if (isMjKind(bs.kind)) {
+    const optionCount = doc.totals.length;
+    const mjBallots: Ballot[] = doc.votes.map((vote, i) => ({
+      account: vote.account,
+      weight: officialWeights.get(vote.account) ?? Dec.ZERO,
+      selection: vote.selection.filter((x) => x >= 0 && x < optionCount),
+      ballotIndex: i,
+    }));
+    const floor = entry.minimumGradeIndex ?? doc.minimumQualifyingGrade;
+    const official = officialMjFigures(
+      mjBallots,
+      optionCount,
+      entry.seats ?? doc.seats,
+      bs.officialQuorum,
+      framework?.minUniqueVoters ?? 0,
+      // The official rule settles at the platform's published Grade Quantile; the document's own
+      // fraction belongs to the OTER leg.
+      THREE_FIFTHS,
+      floor,
     );
-  }
-  check("ballot_source.(b) official_rule.total_weight", bs.officialRule.totalWeight.toString(), official.totalWeight.toString());
-  check("ballot_source.(b) official_rule.quorum_met", String(bs.officialRule.quorumMet), String(official.quorumMet));
-  check("ballot_source.(b) official_rule.approved", String(bs.officialRule.approved), String(official.approved));
+    for (let i = 0; i < Math.max(official.totals.length, bs.officialRule.totals.length); i++) {
+      check(
+        `ballot_source.(b) official_rule.totals[${i}]`,
+        decStr(bs.officialRule.totals[i]),
+        decStr(official.totals[i]),
+      );
+    }
+    check("ballot_source.(b) official_rule.total_weight", bs.officialRule.totalWeight.toString(), official.totalWeight.toString());
+    check("ballot_source.(b) official_rule.quorum_met", String(bs.officialRule.quorumMet), String(official.quorumMet));
+    check("ballot_source.(b) official_rule.approved", String(bs.officialRule.approved), "null");
+    check(
+      "ballot_source.(b) official_rule.winners",
+      canonicalize(bs.officialRule.winners as unknown as Json),
+      canonicalize(official.winners as unknown as Json),
+    );
+    check(
+      "ballot_source.(b) official_rule.majority_judgment",
+      canonicalize(bs.officialRule.majorityJudgment),
+      canonicalize(official.majorityJudgment),
+    );
+    // A Majority Judgment round publishes no approval-rule split and no per-source delta.
+    check(
+      "ballot_source.(b) official_rule.totals_by_source",
+      canonicalize(bs.officialRule.totalsBySource as unknown as Json),
+      "null",
+    );
+    check(
+      "ballot_source.(e) weight_delta_by_source",
+      canonicalize(bs.weightDeltaBySource as unknown as Json),
+      "null",
+    );
+  } else {
+    const publishedBallots = new Map(doc.votes.map((v) => [v.account, v.selection]));
+    // The official threshold is a fraction (0.5); the bar compares against a percentage.
+    const official = officialRuleFigures(
+      publishedBallots,
+      officialWeights,
+      doc.totals.length,
+      bs.officialQuorum,
+      bs.officialApprovalThreshold.mul(Dec.fromInt(100)),
+      framework === null ? null : sides,
+      framework?.mas ?? Dec.ZERO,
+      framework?.minUniqueVoters ?? 0,
+    );
+    for (let i = 0; i < Math.max(official.totals.length, bs.officialRule.totals.length); i++) {
+      check(
+        `ballot_source.(b) official_rule.totals[${i}]`,
+        decStr(bs.officialRule.totals[i]),
+        decStr(official.totals[i]),
+      );
+    }
+    check("ballot_source.(b) official_rule.total_weight", bs.officialRule.totalWeight.toString(), official.totalWeight.toString());
+    check("ballot_source.(b) official_rule.quorum_met", String(bs.officialRule.quorumMet), String(official.quorumMet));
+    check("ballot_source.(b) official_rule.approved", String(bs.officialRule.approved), String(official.approved));
 
-  // The official leg's own split. Summed over every account that cast a ballot — the official
-  // rule has no bar of its own (their vote has none) and no delegation, so its by-source total is
-  // over voters, exactly as the engine's `totals_by_source` is.
-  const officialSum = sumLegs(officialBreakdown, accounts, () => true);
-  check("ballot_source.(b) official_rule.totals_by_source.liquid", bs.officialRule.totalsBySource.liquid.toString(), officialSum.xrd.toString());
-  check("ballot_source.(b) official_rule.totals_by_source.lsu", bs.officialRule.totalsBySource.lsu.toString(), officialSum.lsu.toString());
-  check("ballot_source.(b) official_rule.totals_by_source.lsulp", bs.officialRule.totalsBySource.lsulp.toString(), officialSum.lsulp.toString());
-  check("ballot_source.(b) official_rule.totals_by_source.pool_units", bs.officialRule.totalsBySource.poolUnits.toString(), officialSum.poolUnits.toString());
-  check(
-    "ballot_source.(b) official_rule.totals_by_source.precision_pools",
-    bs.officialRule.totalsBySource.precisionPools.toString(),
-    officialSum.precisionPools.toString(),
-  );
-  check("ballot_source.(b) official_rule.totals_by_source.shape_pools", bs.officialRule.totalsBySource.shapePools.toString(), officialSum.shapePools.toString());
+    // The official leg's own split. Summed over every account that cast a ballot — the official
+    // rule has no bar of its own (their vote has none) and no delegation, so its by-source total
+    // is over voters, exactly as the engine's `totals_by_source` is.
+    const officialSum = sumLegs(officialBreakdown, accounts, () => true);
+    const split = bs.officialRule.totalsBySource;
+    if (split === null) {
+      check("ballot_source.(b) official_rule.totals_by_source", "null", "an object");
+    } else {
+      check("ballot_source.(b) official_rule.totals_by_source.liquid", split.liquid.toString(), officialSum.xrd.toString());
+      check("ballot_source.(b) official_rule.totals_by_source.lsu", split.lsu.toString(), officialSum.lsu.toString());
+      check("ballot_source.(b) official_rule.totals_by_source.lsulp", split.lsulp.toString(), officialSum.lsulp.toString());
+      check("ballot_source.(b) official_rule.totals_by_source.pool_units", split.poolUnits.toString(), officialSum.poolUnits.toString());
+      check(
+        "ballot_source.(b) official_rule.totals_by_source.precision_pools",
+        split.precisionPools.toString(),
+        officialSum.precisionPools.toString(),
+      );
+      check("ballot_source.(b) official_rule.totals_by_source.shape_pools", split.shapePools.toString(), officialSum.shapePools.toString());
+    }
+  }
 
   // (d) ballots outside the window: both bounds resolved from the official timestamps via the
   // SAME Gateway timestamp selector the engine's own state-version lookup uses — see
@@ -914,33 +1404,42 @@ export async function verifyMirrorBallots(
   // (e) weight_delta_by_source: OTER-rule weight minus official-rule weight, per source, over the
   // participating (non-barred, voting) accounts. Both sides come from the same breakdown struct
   // over the same account set, so an account neither rule weighed contributes nothing rather than
-  // appearing as a difference, and a barred ballot is absent from both.
-  const breakdown = await computeAccountWeightBreakdown(
-    gw,
-    accounts,
-    doc.snapshotStateVersion,
-    oterSources,
-    xrdResource,
-  );
-  const counted = (account: string): boolean => !barred.has(account);
-  const oterSum = sumLegs(breakdown, accounts, counted);
-  const officialCountedSum = sumLegs(officialBreakdown, accounts, counted);
-  const delta = {
-    lsu: oterSum.lsu.sub_(officialCountedSum.lsu),
-    poolUnits: oterSum.poolUnits.sub_(officialCountedSum.poolUnits),
-    lsulp: oterSum.lsulp.sub_(officialCountedSum.lsulp),
-    precisionPools: oterSum.precisionPools.sub_(officialCountedSum.precisionPools),
-    shapePools: oterSum.shapePools.sub_(officialCountedSum.shapePools),
-  };
-  check("ballot_source.(e) weight_delta_by_source.lsu", bs.weightDeltaBySource.lsu.toString(), delta.lsu.toString());
-  check("ballot_source.(e) weight_delta_by_source.pool_units", bs.weightDeltaBySource.poolUnits.toString(), delta.poolUnits.toString());
-  check("ballot_source.(e) weight_delta_by_source.lsulp", bs.weightDeltaBySource.lsulp.toString(), delta.lsulp.toString());
-  check(
-    "ballot_source.(e) weight_delta_by_source.precision_pools",
-    bs.weightDeltaBySource.precisionPools.toString(),
-    delta.precisionPools.toString(),
-  );
-  check("ballot_source.(e) weight_delta_by_source.shape_pools", bs.weightDeltaBySource.shapePools.toString(), delta.shapePools.toString());
+  // appearing as a difference, and a barred ballot is absent from both. A Majority Judgment
+  // round publishes no such delta (its official result is a seating, not an approval split), and
+  // the check above has already required the document's claim to be null.
+  if (!isMjKind(bs.kind)) {
+    const breakdown = await computeAccountWeightBreakdown(
+      gw,
+      accounts,
+      doc.snapshotStateVersion,
+      oterSources,
+      xrdResource,
+    );
+    const counted = (account: string): boolean => !barred.has(account);
+    const oterSum = sumLegs(breakdown, accounts, counted);
+    const officialCountedSum = sumLegs(officialBreakdown, accounts, counted);
+    const delta = {
+      lsu: oterSum.lsu.sub_(officialCountedSum.lsu),
+      poolUnits: oterSum.poolUnits.sub_(officialCountedSum.poolUnits),
+      lsulp: oterSum.lsulp.sub_(officialCountedSum.lsulp),
+      precisionPools: oterSum.precisionPools.sub_(officialCountedSum.precisionPools),
+      shapePools: oterSum.shapePools.sub_(officialCountedSum.shapePools),
+    };
+    const claimed = bs.weightDeltaBySource;
+    if (claimed === null) {
+      check("ballot_source.(e) weight_delta_by_source", "null", "an object");
+    } else {
+      check("ballot_source.(e) weight_delta_by_source.lsu", claimed.lsu.toString(), delta.lsu.toString());
+      check("ballot_source.(e) weight_delta_by_source.pool_units", claimed.poolUnits.toString(), delta.poolUnits.toString());
+      check("ballot_source.(e) weight_delta_by_source.lsulp", claimed.lsulp.toString(), delta.lsulp.toString());
+      check(
+        "ballot_source.(e) weight_delta_by_source.precision_pools",
+        claimed.precisionPools.toString(),
+        delta.precisionPools.toString(),
+      );
+      check("ballot_source.(e) weight_delta_by_source.shape_pools", claimed.shapePools.toString(), delta.shapePools.toString());
+    }
+  }
 
   return { differences: diffs, sides };
 }

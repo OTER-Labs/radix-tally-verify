@@ -3,11 +3,17 @@
  * CLI: verify one tally document against Gateway state and the hash committed on-ledger.
  *
  *   radix-tally-verify <tally.json | -> [--gateway URL] [--tally-hash HEX] [--xrd-resource ADDR]
- *                      [--weight-set FILE]
+ *                      [--weight-set FILE] [--excluded-set FILE] [--hash-only]
  *
- * `--weight-set` supplies the weight-source set a mirror document's `weight_set_version` names,
- * as `{"network", "weight_set_version", "weight_sources"}`; check (g) then derives the register
- * the document must carry from it. Ignored for a document that is not a mirror.
+ * `--weight-set` supplies the weight-source set `weight_set_version` names, as
+ * `{"network", "weight_set_version", "weight_sources"}`, and `--excluded-set` supplies the barred
+ * register `excluded_set_version` names, as
+ * `{"excluded_set_version", "excluded_accounts"}`. With them, both versions and both embedded
+ * lists are checked against the registry sets they claim; without them they are carried and
+ * hashed but not checked.
+ *
+ * `--hash-only` parses the document and prints its canonical bytes and tally hash without any
+ * Gateway read — the offline encoding check, and how the golden vectors are verified.
  *
  * Exit codes are the contract — a keeper or a cron job reads them, not the prose:
  *   0  MATCH        figures recompute exactly and (when a hash was supplied) the hash agrees
@@ -19,8 +25,15 @@
 
 import { readFileSync } from "node:fs";
 
-import { DocumentError, parsePinnedWeightSet, parseTallyDocument } from "./document.ts";
-import type { PinnedWeightSet } from "./document.ts";
+import { canonicalize, tallyHash } from "./canonical.ts";
+import type { Json } from "./canonical.ts";
+import {
+  DocumentError,
+  parsePinnedExcludedSet,
+  parsePinnedWeightSet,
+  parseTallyDocument,
+} from "./document.ts";
+import type { PinnedExcludedSet, PinnedWeightSet } from "./document.ts";
 import { RadixGateway } from "./gateway.ts";
 import { verifyTallyDocument } from "./verify.ts";
 
@@ -34,11 +47,13 @@ interface Args {
   tallyHash: string | null;
   xrdResource: string | null;
   weightSet: string | null;
+  excludedSet: string | null;
+  hashOnly: boolean;
 }
 
 function usage(): never {
   process.stderr.write(
-    "usage: radix-tally-verify <tally.json | -> [--gateway URL] [--tally-hash HEX] [--xrd-resource ADDR] [--weight-set FILE]\n",
+    "usage: radix-tally-verify <tally.json | -> [--gateway URL] [--tally-hash HEX] [--xrd-resource ADDR] [--weight-set FILE] [--excluded-set FILE] [--hash-only]\n",
   );
   process.exit(4);
 }
@@ -49,15 +64,26 @@ function parseArgs(argv: string[]): Args {
   let tallyHash: string | null = null;
   let xrdResource: string | null = null;
   let weightSet: string | null = null;
+  let excludedSet: string | null = null;
+  let hashOnly = false;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i] as string;
-    if (a === "--gateway" || a === "--tally-hash" || a === "--xrd-resource" || a === "--weight-set") {
+    if (
+      a === "--gateway" ||
+      a === "--tally-hash" ||
+      a === "--xrd-resource" ||
+      a === "--weight-set" ||
+      a === "--excluded-set"
+    ) {
       const v = argv[++i];
       if (v === undefined) usage();
       if (a === "--gateway") gateway = v;
       else if (a === "--tally-hash") tallyHash = v;
       else if (a === "--weight-set") weightSet = v;
+      else if (a === "--excluded-set") excludedSet = v;
       else xrdResource = v;
+    } else if (a === "--hash-only") {
+      hashOnly = true;
     } else if (a.startsWith("--")) {
       usage();
     } else if (file === null) {
@@ -67,7 +93,7 @@ function parseArgs(argv: string[]): Args {
     }
   }
   if (file === null) usage();
-  return { file, gateway, tallyHash, xrdResource, weightSet };
+  return { file, gateway, tallyHash, xrdResource, weightSet, excludedSet, hashOnly };
 }
 
 /** The XRD resource address follows the network, which the gateway URL names. An unknown
@@ -97,12 +123,53 @@ async function main(): Promise<void> {
     process.exit(4);
   }
 
+  // Offline encoding check: print the canonical bytes and their hash. This is deliberately not a
+  // shape check — an encoding vector need not be a whole tally document — and it is how a golden
+  // vector is checked anywhere, with no Gateway read. An API envelope is unwrapped first, since
+  // its `document_hash_blake2b` is the hash of the inner document.
+  if (args.hashOnly) {
+    const maybeEnvelope =
+      typeof input === "object" && input !== null && !Array.isArray(input)
+        ? (input as Record<string, unknown>)
+        : null;
+    const raw = (maybeEnvelope !== null && maybeEnvelope["document"] !== undefined
+      ? maybeEnvelope["document"]
+      : input) as Json;
+    let canonical: string;
+    let hash: string;
+    try {
+      canonical = canonicalize(raw);
+      hash = tallyHash(raw);
+    } catch (e) {
+      process.stderr.write(
+        `SERIALIZATION DISAGREEMENT: ${e instanceof Error ? e.message : String(e)}\n`,
+      );
+      process.exit(2);
+    }
+    process.stdout.write(`canonical=${canonical}\nhash=${hash}\n`);
+    if (args.tallyHash !== null && args.tallyHash !== hash) {
+      process.stdout.write(`expected=${args.tallyHash}\n`);
+      process.exit(2);
+    }
+    process.exit(0);
+  }
+
   let weightSet: PinnedWeightSet | undefined;
   if (args.weightSet !== null) {
     try {
       weightSet = parsePinnedWeightSet(JSON.parse(readFileSync(args.weightSet, "utf8")));
     } catch (e) {
       process.stderr.write(`MALFORMED: --weight-set ${args.weightSet}: ${e instanceof Error ? e.message : String(e)}\n`);
+      process.exit(4);
+    }
+  }
+
+  let excludedSet: PinnedExcludedSet | undefined;
+  if (args.excludedSet !== null) {
+    try {
+      excludedSet = parsePinnedExcludedSet(JSON.parse(readFileSync(args.excludedSet, "utf8")));
+    } catch (e) {
+      process.stderr.write(`MALFORMED: --excluded-set ${args.excludedSet}: ${e instanceof Error ? e.message : String(e)}\n`);
       process.exit(4);
     }
   }
@@ -134,7 +201,10 @@ async function main(): Promise<void> {
     args.tallyHash,
     new RadixGateway(args.gateway),
     xrdResource,
-    weightSet === undefined ? {} : { weightSet },
+    {
+      ...(weightSet === undefined ? {} : { weightSet }),
+      ...(excludedSet === undefined ? {} : { excludedSet }),
+    },
   );
 
   switch (outcome.kind) {

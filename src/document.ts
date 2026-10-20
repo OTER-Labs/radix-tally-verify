@@ -15,7 +15,7 @@ import { DELEGATION_REFUSALS } from "./delegation.ts";
 import type { DelegationRefusal, SnapshotDelegation } from "./delegation.ts";
 import type { Json } from "./canonical.ts";
 import { asArray, asObject, asString } from "./gateway.ts";
-import { GRADES } from "./verdict.ts";
+import { GRADES, MINIMUM_QUALIFYING_GRADE } from "./verdict.ts";
 import type { GradeQuantile } from "./verdict.ts";
 import { networkOf, registerAddresses } from "./weights.ts";
 import type {
@@ -103,7 +103,11 @@ export type WeightConfig =
  * App's Temperature Checks and its Proposals, each held in its own key-value store on the
  * `Governance` component.
  */
-export type MirrorKind = "temperature_check" | "proposal";
+export type MirrorKind =
+  | "temperature_check"
+  | "proposal"
+  | "majority_judgment_election"
+  | "majority_judgment_election_rerun";
 
 /**
  * `ballot_source.oter_register_scope`: how much of the weight-source register the OTER-rule leg
@@ -125,6 +129,17 @@ export interface PinnedWeightSet {
   network: "mainnet" | "stokenet";
   version: number;
   sources: WeightSources;
+}
+
+/**
+ * The excluded set `excluded_set_version` names, as the registry holds it. Like
+ * {@link PinnedWeightSet}, supplied by whoever fetched it from the registry: this tool reads
+ * Gateway state, not the registry, so the set is checked against the document only when the
+ * caller provides it.
+ */
+export interface PinnedExcludedSet {
+  version: number;
+  accounts: string[];
 }
 
 /** The official rule's total split the same six ways an OTER-rule weight is. `liquid` is the
@@ -154,12 +169,21 @@ export interface OfficialRuleClaim {
   allowlistVersion: string;
   allowlistHash: string;
   totals: Dec[];
-  totalsBySource: OfficialTotalsBySource;
+  /** `null` on a Majority Judgment round: the official rule's per-source split is published
+   * only for a Temperature Check or Proposal. */
+  totalsBySource: OfficialTotalsBySource | null;
   totalWeight: Dec;
   quorumMet: boolean;
   /** `null` when the official vote has no decision sides (see `decisionSides`) or its parameter
-   * set is one the framework table does not name. */
+   * set is one the framework table does not name. Always `null` on a Majority Judgment round,
+   * which has no approval verdict. */
   approved: boolean | null;
+  /** Majority Judgment only: the official leg's seated candidates, `null` when it missed
+   * quorum. Absent on a Temperature Check or Proposal. */
+  winners: number[] | null;
+  /** Majority Judgment only: the official leg's `majority_judgment` block, `null` when it
+   * missed quorum. Absent on a Temperature Check or Proposal. */
+  majorityJudgment: Json;
 }
 
 /**
@@ -212,7 +236,8 @@ export interface BallotSource {
   officialEntryStateVersion: number;
   ballotsOutsideWindow: number;
   officialRule: OfficialRuleClaim;
-  weightDeltaBySource: WeightDeltaBySource;
+  /** `null` on a Majority Judgment round: no approval-rule delta is published there. */
+  weightDeltaBySource: WeightDeltaBySource | null;
   /** `official_snapshot`: the Instant the weight snapshot anchors to — the vote's own `snapshot`
    * field on a Temperature Check, its `start` on a Proposal (which carries no snapshot). */
   officialSnapshot: number;
@@ -233,6 +258,15 @@ export interface BallotSource {
   framework: FrameworkClaim | null;
   /** `oter_register_scope`: `"full"` or `"network_independent"`, checked by (g). */
   oterRegisterScope: RegisterScope;
+  /** Majority Judgment only: which round this document mirrors, `"RoundOne"` or `"Rerun"`. */
+  officialRound: "RoundOne" | "Rerun" | null;
+  /** Majority Judgment only: the election's role identifier. */
+  officialRoleId: string | null;
+  /** Majority Judgment only: the candidates' references, in id order. */
+  officialCandidateReferences: string[] | null;
+  /** Majority Judgment only: the owner's recorded tie order for this round, published and never
+   * applied; `null` when none is recorded or it names the other round. */
+  officialTieResolution: number[] | null;
 }
 
 /** `ballot_source.official_parameter_set`. */
@@ -346,6 +380,12 @@ export interface TallyDocument {
   assetSymbol: string;
   weightSources: WeightSources;
   /**
+   * The document's `weight_rule`: the rule in words, carried inside the hash so a challenger
+   * recomputes from the rule rather than from an implementation. Checked against the text the
+   * document's own `weight_config` implies; `null` on a document that publishes none.
+   */
+  weightRule: string | null;
+  /**
    * Accounts the DAO controls, whose balances may not be voted (framework 47ceb27, charter §5).
    * Carried inside the hashed document for exactly the reason `weight_sources` is: it is not
    * recomputable from Gateway state, and a challenger who applied a different list would
@@ -398,6 +438,14 @@ export interface TallyDocument {
    * a lie. `null` when the document publishes none — see `VerdictSpec.gradeQuantile`.
    */
   gradeQuantile: GradeQuantile | null;
+  /**
+   * The floor a Majority Judgment result was allocated under, as a `GRADES` ordinal, from
+   * `majority_judgment.minimum_qualifying_grade`. Absent means `MINIMUM_QUALIFYING_GRADE`
+   * ("Good"), which is what every ordinary election applies. A mirror of an official round
+   * uses the round's own `minimum_median_grade`, published in the same field, so it is an
+   * input here for the same reason the Grade Quantile is.
+   */
+  minimumQualifyingGrade: number;
   winners: number[] | null;
   withdrawnExcluded: number[] | null;
   approveWeight: Dec | null;
@@ -807,6 +855,29 @@ function parseGradeQuantile(mjRaw: unknown): GradeQuantile | null {
   return { numerator: num, denominator: den };
 }
 
+/**
+ * `majority_judgment.minimum_qualifying_grade`, as a `GRADES` ordinal. Absent is the platform's
+ * own floor, "Good". A name outside the five-point scale is refused: a floor nobody can locate
+ * on the scale is not a floor, and silently falling back to "Good" would hide it.
+ */
+function parseMinimumQualifyingGrade(mjRaw: unknown): number {
+  if (typeof mjRaw !== "object" || mjRaw === null || Array.isArray(mjRaw)) {
+    return MINIMUM_QUALIFYING_GRADE;
+  }
+  const raw = (mjRaw as Record<string, unknown>)["minimum_qualifying_grade"];
+  if (raw === undefined || raw === null) return MINIMUM_QUALIFYING_GRADE;
+  const name = asString(raw);
+  if (name === null) fail("majority_judgment.minimum_qualifying_grade", "is neither absent nor a string");
+  const index = (GRADES as readonly string[]).indexOf(name);
+  if (index < 0) {
+    fail(
+      "majority_judgment.minimum_qualifying_grade",
+      `is ${JSON.stringify(name)}, not one of ${JSON.stringify(GRADES)}`,
+    );
+  }
+  return index;
+}
+
 /** The document's `options`: absent or null is `[]`; present, every entry must be a string. */
 function parseOptions(raw: unknown): string[] {
   if (raw === null || raw === undefined) return [];
@@ -818,7 +889,12 @@ function parseOptions(raw: unknown): string[] {
   });
 }
 
-const MIRROR_KINDS: readonly MirrorKind[] = ["temperature_check", "proposal"];
+const MIRROR_KINDS: readonly MirrorKind[] = [
+  "temperature_check",
+  "proposal",
+  "majority_judgment_election",
+  "majority_judgment_election_rerun",
+];
 
 /**
  * The `ballot_source` block version this verifier implements.
@@ -835,7 +911,7 @@ const MIRROR_KINDS: readonly MirrorKind[] = ["temperature_check", "proposal"];
  */
 export const SUPPORTED_MIRROR_DOC_VERSION = 3;
 
-function parseOfficialRuleClaim(raw: unknown): OfficialRuleClaim {
+function parseOfficialRuleClaim(raw: unknown, majorityJudgment: boolean): OfficialRuleClaim {
   const o = asObject(raw);
   const rule = asString(o["rule"]);
   if (rule === null) fail("ballot_source.official_rule.rule", "is missing or not a string");
@@ -852,27 +928,41 @@ function parseOfficialRuleClaim(raw: unknown): OfficialRuleClaim {
       );
     }
   });
-  const bySource = asObject(o["totals_by_source"]);
-  return {
-    rule: rule as string,
-    allowlistVersion: reqString(o, "allowlist_version"),
-    allowlistHash: reqString(o, "allowlist_hash"),
-    totals,
-    totalsBySource: {
+  // A Majority Judgment round publishes no approval-rule split, so the key is null there.
+  const bySourceRaw = o["totals_by_source"];
+  let totalsBySource: OfficialTotalsBySource | null = null;
+  if (bySourceRaw !== null && bySourceRaw !== undefined) {
+    const bySource = asObject(bySourceRaw);
+    totalsBySource = {
       liquid: reqDec(bySource, "liquid"),
       lsu: reqDec(bySource, "lsu"),
       lsulp: reqDec(bySource, "lsulp"),
       poolUnits: reqDec(bySource, "pool_units"),
       precisionPools: reqDec(bySource, "precision_pools"),
       shapePools: reqDec(bySource, "shape_pools"),
-    },
+    };
+  } else if (!majorityJudgment) {
+    fail("ballot_source.official_rule.totals_by_source", "is missing");
+  }
+  return {
+    rule: rule as string,
+    allowlistVersion: reqString(o, "allowlist_version"),
+    allowlistHash: reqString(o, "allowlist_hash"),
+    totals,
+    totalsBySource,
     totalWeight: reqDec(o, "total_weight"),
     quorumMet: reqBool(o, "quorum_met"),
     approved: optBool(o, "approved"),
+    winners: optIntArray(o["winners"], "ballot_source.official_rule.winners"),
+    majorityJudgment: (o["majority_judgment"] ?? null) as Json,
   };
 }
 
-function parseWeightDeltaBySource(raw: unknown): WeightDeltaBySource {
+function parseWeightDeltaBySource(raw: unknown, majorityJudgment: boolean): WeightDeltaBySource | null {
+  if (raw === null || raw === undefined) {
+    if (majorityJudgment) return null;
+    fail("ballot_source.weight_delta_by_source", "is missing");
+  }
   const o = asObject(raw);
   return {
     lsu: reqDec(o, "lsu"),
@@ -958,22 +1048,19 @@ function parseFrameworkClaim(o: Record<string, unknown>): FrameworkClaim | null 
  * this file — a document written before mirror tallies existed, or an ordinary Poll/Binding/
  * Election document, verifies exactly as it always did.
  *
- * A Majority Judgment round's mirror is refused by name: this verifier checks the Temperature
- * Check and Proposal mirrors only.
+ * A Majority Judgment round (`majority_judgment_election`, `..._rerun`) publishes the
+ * Election-shaped document: candidates rather than For/Against sides, and the round's own
+ * seating. Its extra keys are parsed only there, since a Temperature Check or Proposal does
+ * not carry them.
  */
 function parseBallotSource(raw: unknown): BallotSource | null {
   if (raw === null || raw === undefined) return null;
   const o = asObject(raw);
   const kind = asString(o["kind"]);
-  if (kind === "majority_judgment_election" || kind === "majority_judgment_election_rerun") {
-    fail(
-      "ballot_source.kind",
-      `is ${kind}: this verifier does not implement Majority Judgment mirror verification`,
-    );
-  }
   if (kind === null || !(MIRROR_KINDS as readonly string[]).includes(kind)) {
     fail("ballot_source.kind", `is missing or not one of ${JSON.stringify(MIRROR_KINDS)}`);
   }
+  const isMj = kind === "majority_judgment_election" || kind === "majority_judgment_election_rerun";
   const mirrorDocVersion = reqInt(o, "mirror_doc_version");
   if (mirrorDocVersion !== SUPPORTED_MIRROR_DOC_VERSION) {
     fail(
@@ -1000,8 +1087,8 @@ function parseBallotSource(raw: unknown): BallotSource | null {
     ballotStateVersion: reqInt(o, "ballot_state_version"),
     officialEntryStateVersion: reqInt(o, "official_entry_state_version", "ballot_source.official_entry_state_version"),
     ballotsOutsideWindow: reqInt(o, "ballots_outside_window"),
-    officialRule: parseOfficialRuleClaim(o["official_rule"]),
-    weightDeltaBySource: parseWeightDeltaBySource(o["weight_delta_by_source"]),
+    officialRule: parseOfficialRuleClaim(o["official_rule"], isMj),
+    weightDeltaBySource: parseWeightDeltaBySource(o["weight_delta_by_source"], isMj),
     officialSnapshot: reqInt(o, "official_snapshot", "ballot_source.official_snapshot"),
     officialParameterSet: parseOfficialParameterSet(o),
     officialOutcome: parseOfficialOutcome(o),
@@ -1009,7 +1096,37 @@ function parseBallotSource(raw: unknown): BallotSource | null {
     officialMaxSelections: nullableInt(o, "official_max_selections", "ballot_source.official_max_selections"),
     framework: parseFrameworkClaim(o),
     oterRegisterScope: parseRegisterScope(o),
+    officialRound: isMj ? parseOfficialRound(o) : null,
+    officialRoleId: isMj ? reqString(o, "official_role_id", "ballot_source.official_role_id") : null,
+    officialCandidateReferences: isMj ? parseStringArray(o, "official_candidate_references") : null,
+    officialTieResolution: isMj
+      ? optIntArray(nullableKey(o, "official_tie_resolution", "ballot_source.official_tie_resolution"), "ballot_source.official_tie_resolution")
+      : null,
   };
+}
+
+/** `official_round`: written on every Majority Judgment document and only ever the two names. */
+function parseOfficialRound(o: Record<string, unknown>): "RoundOne" | "Rerun" {
+  const path = "ballot_source.official_round";
+  if (!Object.hasOwn(o, "official_round") || o["official_round"] === undefined) {
+    fail(path, "is missing (it is written on every Majority Judgment v3 document)");
+  }
+  const v = o["official_round"];
+  if (v !== "RoundOne" && v !== "Rerun") fail(path, `is ${JSON.stringify(v)}, not "RoundOne" or "Rerun"`);
+  return v;
+}
+
+/** A required array of strings, refused entry by entry. */
+function parseStringArray(o: Record<string, unknown>, field: string): string[] {
+  const path = `ballot_source.${field}`;
+  if (!Object.hasOwn(o, field) || o[field] === undefined) fail(path, "is missing");
+  const raw = o[field];
+  if (!Array.isArray(raw)) fail(path, "is not an array");
+  return raw.map((entry, i) => {
+    const s = asString(entry);
+    if (s === null) fail(`${path}[${i}]`, "is not a string");
+    return s;
+  });
 }
 
 /** Written on every v3 document, and only ever one of the two values: anything else, absence
@@ -1064,6 +1181,39 @@ export function parsePinnedWeightSet(input: unknown): PinnedWeightSet {
     }
   }
   return { network: network as "mainnet" | "stokenet", version: version as number, sources: sources! };
+}
+
+/**
+ * The `--excluded-set` file: `{"excluded_set_version": N, "excluded_accounts": [...]}`, the
+ * barred register as the consultation registry holds that version. Accounts are compared as a
+ * list, in the document's own ascending order, so an out-of-order or duplicated file is refused
+ * rather than silently equal to a sorted one.
+ */
+export function parsePinnedExcludedSet(input: unknown): PinnedExcludedSet {
+  const setFail = (field: string, why: string): never => {
+    throw new DocumentError(`excluded set: field ${field} ${why}`);
+  };
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    setFail("(root)", "is not a JSON object");
+  }
+  const o = input as Record<string, unknown>;
+  const version = o["excluded_set_version"];
+  if (typeof version !== "number" || !Number.isSafeInteger(version) || version < 0) {
+    setFail("excluded_set_version", "is missing or not a non-negative integer");
+  }
+  const raw = o["excluded_accounts"];
+  if (!Array.isArray(raw)) setFail("excluded_accounts", "is missing or not an array");
+  const accounts = (raw as unknown[]).map((entry, i) => {
+    const s = asString(entry);
+    if (s === null) setFail(`excluded_accounts[${i}]`, "is not a string");
+    return s as string;
+  });
+  for (let i = 1; i < accounts.length; i++) {
+    if (compareUtf8(accounts[i - 1] as string, accounts[i] as string) >= 0) {
+      setFail("excluded_accounts", `is not strictly ascending by UTF-8 bytes at index ${i}`);
+    }
+  }
+  return { version: version as number, accounts };
 }
 
 /**
@@ -1163,6 +1313,14 @@ export function parseTallyDocument(input: unknown): { doc: TallyDocument; envelo
     assetSymbol = s;
   }
 
+  const weightRuleRaw = raw["weight_rule"];
+  let weightRule: string | null = null;
+  if (weightRuleRaw !== undefined && weightRuleRaw !== null) {
+    const s = asString(weightRuleRaw);
+    if (s === null) fail("weight_rule", "is neither absent nor a string");
+    weightRule = s;
+  }
+
   const doc: TallyDocument = {
     raw: raw as Json,
     tallyDocVersion: optInt(raw, "tally_doc_version"),
@@ -1175,6 +1333,7 @@ export function parseTallyDocument(input: unknown): { doc: TallyDocument; envelo
     termSeconds: optInt(raw, "term_seconds") ?? 0,
     assetSymbol,
     weightSources: parseWeightSources(raw["weight_sources"]),
+    weightRule,
     excludedAccounts: parseExcludedAccounts(raw["excluded_accounts"]),
     weightSetVersion: optInt(raw, "weight_set_version"),
     excludedSetVersion: optInt(raw, "excluded_set_version"),
@@ -1196,6 +1355,7 @@ export function parseTallyDocument(input: unknown): { doc: TallyDocument; envelo
     seatRule,
     majorityJudgment: (raw["majority_judgment"] ?? null) as Json,
     gradeQuantile: parseGradeQuantile(raw["majority_judgment"]),
+    minimumQualifyingGrade: parseMinimumQualifyingGrade(raw["majority_judgment"]),
     winners,
     withdrawnExcluded: optIntArray(raw["withdrawn_excluded"], "withdrawn_excluded"),
     approveWeight: optDec(raw, "approve_weight"),

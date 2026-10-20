@@ -16,6 +16,7 @@ import { test } from "node:test";
 import { tallyHash } from "../src/canonical.ts";
 import type { Json } from "../src/canonical.ts";
 import { ELIGIBLE_DERIVATION, FRAMEWORK_SOURCE } from "../src/framework.ts";
+import { OFFICIAL_RULE_TEXT } from "../src/mirror.ts";
 import { verifyTallyDocument } from "../src/verify.ts";
 
 import { FakeGateway, SNAPSHOT_SV, XRD } from "./fake-gateway.ts";
@@ -31,11 +32,6 @@ const hash = (doc: Record<string, unknown>): string => tallyHash(doc as unknown 
 const COMPONENT = "component_tdx_2_1cp0governance000000000000000000000000000000000007";
 /** blake2b-256 of the canonical `[]` — the stokenet list's `allowlist_hash`. */
 const STOKENET_ALLOWLIST_HASH = "c2c013c86a9c92e22f966f3d8617768f8b7a44c902adcc097bfa1e098afb4e1f";
-const OFFICIAL_RULE_TEXT =
-  "The Radix DAO Consultation App's own rule at snapshot_state_version: direct XRD at par, plus " +
-  "the stake units of every validator at their underlying XRD value, plus LSULP at its " +
-  "underlying liquid-staked XRD value, plus the XRD, LSU and LSULP side of each position on the " +
-  "app's static DEX allowlist.";
 const TC_REGISTER_KVS = "internal_keyvaluestore_rdx1kvtc0000000000000000000000000000000008";
 const VOTERS_KVS = "internal_keyvaluestore_rdx1kvvoters00000000000000000000000000009";
 const LSU = "resource_rdx1lsu000000000000000000000000000000000000000000000001";

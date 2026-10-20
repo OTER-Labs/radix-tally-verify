@@ -39,6 +39,24 @@ test("a temperature check is 3 % with no MAS under every set; an unknown proposa
   assert.equal(frameworkFor("proposal", "dao-treasury", Dec.parse("945582814"))?.minUniqueVoters, 50);
 });
 
+test("a Majority Judgment round uses the dao-election row: 7 %, no MAS, no voter floor", () => {
+  const f = frameworkFor("majority_judgment_election", "dao-election", Dec.parse("100"));
+  assert.ok(f !== null);
+  assert.equal(f.quorumPc.toString(), "7");
+  assert.equal(f.masPc.toString(), "0");
+  assert.equal(f.mas.toString(), "0");
+  assert.equal(f.minUniqueVoters, 0);
+  assert.equal(f.eligible.toString(), "1428.571428571428571428");
+  assert.equal(f.bound.toString(), "14.285714285714285714");
+  assert.deepEqual(
+    frameworkFor("majority_judgment_election_rerun", "dao-election", Dec.parse("100")),
+    f,
+  );
+  // The election row is not a proposal row, and a round under any other set gets no bar.
+  assert.equal(frameworkFor("proposal", "dao-election", Dec.parse("100")), null);
+  assert.equal(frameworkFor("majority_judgment_election", "default", Dec.parse("100")), null);
+});
+
 test("sides come from the labels, never the positions", () => {
   assert.deepEqual(decisionSides("temperature_check", [], null), { approve: 1, reject: 0, abstain: null });
   assert.deepEqual(decisionSides("proposal", ["Reject", "Abstain", "Approve"], null), { approve: 2, reject: 0, abstain: 1 });

@@ -1,0 +1,150 @@
+{
+  "abstain_allowed": true,
+  "abstain_weight": "0",
+  "approval_threshold_pc": "50",
+  "approve_weight": "1300",
+  "approved": true,
+  "asset_symbol": "XRD",
+  "ballot_source": {
+    "ballot_count": 3,
+    "ballot_state_version": 542970896,
+    "ballots_outside_window": 0,
+    "blueprint": "Governance",
+    "component": "component_rdx1czn_official",
+    "framework": {
+      "eligible_voting_power_bound": "33.333333333333333333",
+      "eligible_voting_power_derivation": "quorum * 100 / quorum_pc (the DAO's absolute quorums are truncated to whole XRD, so the true figure lies in [derived, derived + 100/quorum_pc))",
+      "mas_pc": "0",
+      "min_unique_voters": 0,
+      "quorum_pc": "3",
+      "source": "RadixDAO/governance-framework@470a047 Parameters Registry §3.2, §3.3A, §8A"
+    },
+    "kind": "temperature_check",
+    "mirror_doc_version": 3,
+    "official_approval_threshold": "0.5",
+    "official_continuation": {
+      "id": 6,
+      "kind": "proposal"
+    },
+    "official_deadline": 1785431200,
+    "official_entry_state_version": 542970990,
+    "official_id": 5,
+    "official_max_selections": null,
+    "official_outcome": {
+      "recorded_at": 1785431500,
+      "result": "Passed"
+    },
+    "official_parameter_set": {
+      "id": "default",
+      "label": "Standard Executable",
+      "variant": "Standard",
+      "version": 2
+    },
+    "official_quorum": "1000",
+    "official_revote_count": 1,
+    "official_rule": {
+      "allowlist_hash": "bfadafb515c346c6f44b18f18a0ea71bd019523193ff49db7a8f6c53d704946f",
+      "allowlist_version": "2026-09-06",
+      "approved": false,
+      "quorum_met": false,
+      "rule": "The Radix DAO Consultation App's own rule at snapshot_state_version: direct XRD at par, plus the stake units of every validator at their underlying XRD value, plus LSULP at its underlying liquid-staked XRD value, plus the XRD, LSU and LSULP side of each position on the app's static DEX allowlist (Ociswap V1/V2 precision receipts and Basic/Flex pool units, CaviarNine Simple/HLP pool units and Shape receipts, DefiPlaza Base/Quote pool units) — the allowlist identified by allowlist_version and allowlist_hash below. The other token in a pair adds no voting power. Voters only: no delegation, and none of this platform's own charter bar, which that vote does not have.",
+      "total_weight": "800",
+      "totals": [
+        "400",
+        "400"
+      ],
+      "totals_by_source": {
+        "liquid": "800",
+        "lsu": "0",
+        "lsulp": "0",
+        "pool_units": "0",
+        "precision_pools": "0",
+        "shape_pools": "0"
+      }
+    },
+    "official_snapshot": 1784999200,
+    "official_start": 1784999200,
+    "official_vote_count": 4,
+    "oter_register_scope": "full",
+    "weight_delta_by_source": {
+      "lsu": "0",
+      "lsulp": "0",
+      "pool_units": "900",
+      "precision_pools": "0",
+      "shape_pools": "0"
+    }
+  },
+  "category": "mirror:temperature_check:5",
+  "consultation_id": "official:temperature_check:5",
+  "delegated_weight_total": null,
+  "delegation_input": null,
+  "delegations": null,
+  "eligible_voting_power": "33333.333333333333333333",
+  "excluded_accounts": [],
+  "excluded_set_version": 0,
+  "final_seats": 0,
+  "kind": "Poll",
+  "majority_judgment": null,
+  "mas_met": true,
+  "min_affirmative_support": "0",
+  "min_unique_voters": 0,
+  "options": [
+    "Against",
+    "For"
+  ],
+  "parent_candidate_index": null,
+  "parent_id": null,
+  "quorum": "1000",
+  "quorum_met": true,
+  "reject_weight": "400",
+  "seat_rule": null,
+  "seats": 0,
+  "snapshot_state_version": 542900000,
+  "space_id": 0,
+  "tally_doc_version": 22,
+  "term_seconds": 0,
+  "title": "Reduce validator fee cap",
+  "total_weight": "1700",
+  "totals": [
+    "400",
+    "1300"
+  ],
+  "vote_end": 1785431200,
+  "vote_start": 1784999200,
+  "voter_count": 3,
+  "votes": [
+    {
+      "account": "account_rdx_alice",
+      "selection": [
+        1
+      ],
+      "weight": "1000"
+    },
+    {
+      "account": "account_rdx_bob",
+      "selection": [
+        1
+      ],
+      "weight": "300"
+    },
+    {
+      "account": "account_rdx_carol",
+      "selection": [
+        0
+      ],
+      "weight": "400"
+    }
+  ],
+  "weight_config": {
+    "kind": "Xrd"
+  },
+  "weight_rule": "weight(account) = XRD balance + sum over validator stake units held of (lsu_balance * validator_stake_xrd / lsu_total_supply) + sum over native pool units held of (unit_balance * pool_xrd_backing / unit_total_supply), where pool_xrd_backing = the pool's XRD vault balance + the same LSU conversion applied to any LSUs the pool holds. A pool unit is a held resource whose `pool` metadata names a native pool component (address prefix pool_) that names that same resource back in its own `pool_unit` metadata — both directions required, since metadata alone is a claim by the resource's creator. Pool units and liquidity positions held BY a pool are not followed (one level), and a non-fungible liquidity position is not counted except through the precision_pools and shape_pools legs described below. Which pool units count is governed by the weight_sources register carried in this document (mirroring the DAO framework's RAC-maintained supplementary-source register): mode all counts every verified native pool unit, allowlist counts only units of the listed pool components, off counts none. When the register additionally carries an lsulp leg (absent = off) naming an exact component and resource pair, a held balance of that resource counts at lsulp_rate = the named component's dex_valuation_xrd state field divided by the named resource's total supply, both read at the same snapshot state version, with a non-positive supply yielding rate 0; the pair is NAMED, never discovered, because dex_valuation_xrd is a number the component reports about itself and carries no pool_unit-style back-reference to verify, so only an explicitly registered pair may count; a balance of the named resource held BY a counted native pool is valued into that pool's XRD backing at the same lsulp_rate. When the register additionally carries a precision_pools leg (absent = off) naming exact Ociswap PrecisionPool COMPONENT addresses, each non-fungible liquidity position of a named pool that the account held at the snapshot adds the XRD value of its PRINCIPAL. A named component is checked before any of its positions is valued: the gateway must report its blueprint_name as PrecisionPool, its own lp_manager state field names the position resource, and that resource must name the component back in its pool metadata — a named component that fails either check is a register error and no tally is produced, while a named component the gateway does not return at the snapshot state version simply did not exist yet and contributes zero. The pool's two token resources are the resources of the vaults its liquidity-vault state fields name — x_vault and y_vault in Ociswap's V1 package, x_liquidity and y_liquidity in its V2 package, both of which report the blueprint as PrecisionPool, so whichever pair of names the component carries is the pair to read — taken from the ledger and never from metadata. A position's liquidity, left_bound and right_bound are its non-fungible data at the snapshot; a position with no data there (burned by then, or not yet minted) contributes zero, and accrued fees are not counted. Write P for the component's price_sqrt state field, L for the position's liquidity, and for a tick t write S(t) = 1.000049998750062496094023416993798697 raised to the power t, evaluated in 36-decimal fixed point by exponentiation by squaring with truncation after every multiplication, a negative t evaluated as one divided by the base (truncated to the same 36 decimals) raised to the power -t; write A = S(left_bound) and B = S(right_bound). If B <= A or L <= 0 the position holds nothing. Otherwise, if P <= A the position holds x = max(L/A - L/B, 0) of token_x and no token_y; if P >= B it holds no token_x and y = L*(B - A) of token_y; otherwise it holds x = max(L/P - L/B, 0) and y = L*(P - A). Each amount is then truncated toward zero to its own resource's divisibility and valued by the recognitions already stated — XRD at par, a validator stake unit at its redemption rate, the registered LSULP resource at lsulp_rate, and any other resource at zero. When the register additionally carries a shape_pools leg (absent = off) naming exact CaviarNine QuantaSwap COMPONENT addresses, each liquidity receipt of a named pool that the account held at the snapshot adds the XRD value of its claims, under the same naming, blueprint (QuantaSwap), back-reference (the component's liquidity_receipt_manager state field, and that resource's component metadata naming the component back), token-resource (the tokens_x and tokens_y vaults) and missing-data rules. A receipt carries liquidity_claims, a map from tick to claim amount. Let c be the pool's tick_index.current: if the pool has no current tick the whole receipt is worth zero. For each claimed tick t with claim k: if t equals c and the pool's active_total_claim is positive, the claim is worth (k / active_total_claim) * active_x of token_x plus (k / active_total_claim) * active_y of token_y; if t is less than c and the pool's bin_map has an entry for t whose total_claim is positive, it is worth (k / total_claim) * that bin's amount of token_y; if t is greater than c under the same condition, the same quantity of token_x; a tick with no bin entry, or whose bin total_claim is not positive, is worth zero. The bin map is read in full from the key-value store named by the component's bin_map state field, at the same snapshot state version. The resulting token_x and token_y amounts are valued by the same recognitions as above. Both concentrated-liquidity legs are NAMED, never discovered, for the lsulp reason one step stronger: a position's value is not a pro-rata share of a vault balance but the output of a formula over state fields the component reports about itself, and the two-way metadata check that admits a native pool unit cannot admit these, because both sides of that link live in the ordinary component_ and resource_ address spaces which anyone may occupy, so a mutual link there shows only that one author wrote both halves; only components the register names may count. All values read from Gateway state at_ledger_state = snapshot_state_version — the last ledger state at or before the consultation's vote_start, since the snapshot occurs at the start of the voting period; resolved via the Gateway timestamp selector, pinned in this document, and provisional at the creation state version only before voting opens, when no vote can exist yet. One exception: a Stage 2 RERUN reuses the snapshot of the round it re-runs, because the remedy a rerun offers is time and it would not be that if the electorate changed with it. Among the Stage 2 consultations naming the same (parent_id, parent_candidate_index), the FIRST by creation state version is the confirmation and resolves its own snapshot; any later one is the rerun and inherits that first snapshot verbatim — following every fungible-resource page of the account, not only the first. Latest on-ledger vote per account counts. Funds under the DAO's control may not be used for governance participation: no balance in an account the DAO controls may be voted or delegated, and the barred set is carried in this document as excluded_accounts (a sorted, deduplicated list of account addresses; [] = nobody barred). The bar is written against the ACCOUNT rather than the resource, so it follows the balance through staking, pooling and delegation. A ballot from a barred account is NOT A VOTE — it counts toward no option, not toward total_weight, not toward abstain_weight, not toward voter_count, and not toward any Majority Judgment grade weight or a candidate's cast; it is treated exactly as an account that did not vote, and is reported in votes flagged excluded rather than omitted, so the exclusion can be checked instead of merely trusted. This determines who may vote; it does not change how quorum is measured, and no bar is rescaled to compensate. When the register additionally carries a delegation leg (absent = off) naming an exact delegation COMPONENT address, an account may have its weight cast by another account. The delegations that count are the ones recorded by the NAMED component at or before the snapshot state version: for each delegator, the LATEST record at or before that state version — ordered by state version and, within one state version, by the component's own monotonic write sequence — is the delegation in force, and a record whose latest form is a revocation is no delegation. A delegation created, repointed or revoked AFTER the snapshot state version is invisible to this consultation in BOTH directions: an open vote's electorate cannot be enlarged by delegating into it, and cannot be shrunk by revoking out of it, because a delegation that could move weight in a vote already open would be a way to change an electorate mid-vote. Delegation is ONE HOP and is never transitive: if A delegates to B and B delegates to C, A's weight is available to B and stops there, and does not reach C; the account a delegator named is the account that may cast that delegator's weight, always, and never an account further down a chain the delegator neither named nor can see. A self-delegation is no delegation. A delegation is EFFECTIVE for this consultation only if ALL of the following hold: the delegator is not barred by excluded_accounts; the delegator cast NO ballot in this consultation, because a ballot is a specific later act by the same account owner and a specific act revokes a standing instruction for the vote it is cast in — an EMPTY ballot is a ballot and revokes, and a ballot that Majority Judgment rules invalid is a ballot and revokes; the delegate had not, at or before the snapshot state version and under the same latest-record rule, declined to accept delegated weight through the same component; the delegate is not barred by excluded_accounts; and the delegate cast a ballot in this consultation. A delegator whose delegate did not vote, or whose delegate is barred, or whose delegate has declined, has their weight cast by NOBODY: it counts toward nothing and it does not fall back to the delegator, exactly as for an account that did not vote. An effective delegation ADDS the delegator's weight, computed by the rule above at the same snapshot state version, to the weight the delegate's ballot carries — to every option that ballot selects, to total_weight, to abstain_weight if that ballot is empty, and, for a Majority Judgment election, to every grade that ballot expresses — so an effective delegation shares the fate of the ballot it attached to, and if that ballot is ruled invalid the delegated weight counts toward nothing with it. It does NOT add to voter_count: a delegate is ONE voter however many accounts delegated to them, because the unique-voter floor counts the accounts that turned up and delegation moves weight, not people. Because each delegator has at most one delegation in force, because delegated weight is only ever added to a ballot and never re-delegated onward, and because a delegator who voted keeps their own weight, no account's weight is counted more than once; and because the resolution performs no graph traversal it terminates whatever the delegations say, including a ring of any length. The bar on funds under the DAO's control follows the balance through delegation exactly as it follows it through staking and pooling, and this is the point at which it is enforced: the weight of a barred account does not reach a vote through a delegate, and a barred account named as a DELEGATE receives nothing, because its own ballot is not a vote. Every delegation in force at the snapshot is reported in delegations with the delegator, the delegate, the delegator's weight, whether it counted and, when it did not, which of the conditions above it failed — reported rather than omitted, so the resolution can be checked instead of merely trusted; delegations is null when the leg was not in force for this consultation and [] when it was and nobody had delegated, and delegated_weight_total is the total weight that reached a ballot by delegation. A ballot with an EMPTY selection is an abstention: its weight counts toward total_weight (and therefore toward quorum) and toward no option, so it can carry a consultation over quorum without moving any outcome. Approval voting: each selected option index receives the voter's full weight. An Election fills its `seats` by the rule named in `seat_rule`. MajorityJudgment (the DAO framework's DEFAULT election mechanism — Proposal & Voting Framework §4.5: every election runs under it unless the DAO has resolved otherwise by Governance Process proposal, and the administering body has no power to depart from it on its own motion): the ballot grades EVERY candidate on the five-point scale Excellent/Very Good/Good/Acceptable/Poor, encoded in the index space as candidate_index * 5 + grade_ordinal, and a ballot that does not grade each candidate exactly once is INVALID rather than partial (its indices are reported in the document's majority_judgment.invalid_ballots and its weight counts toward no grade and toward no option total, and neither toward total_weight nor toward voter_count nor toward abstain_weight — Participation is the total power of VALID ballots only, so a malformed ballot cannot carry an election over quorum without expressing a single grade). The Grade Quantile applied is stated in the document as majority_judgment.grade_quantile, an exact numerator and denominator, so a stored result is recomputable under the rule that produced it rather than under whatever rule is current. A candidate's QUALIFYING GRADE is the highest grade whose at-or-above weight reaches the Grade Quantile STATED IN THIS DOCUMENT as majority_judgment.grade_quantile — an exact numerator and denominator, compared by cross-multiplication (at_or_above * denominator >= cast * numerator) and never by division — of the weight cast for that candidate, with weight landing exactly on the quantile resolving upward; recompute with the fraction this document publishes, not with whatever value is current, since that is the whole reason it is published; a candidate whose qualifying grade is below Good is not seatable at all; the rest rank by qualifying grade, then by the majority gauge over p (weight above the qualifying grade) and q (weight below it) — p > q outranks p == q outranks p < q, higher p wins inside p > q, lower q wins inside p < q. Candidates tied on qualifying grade, p AND q are NOT separated by index: a tied group straddling the seat boundary seats nobody, stops the seating and is reported in majority_judgment.referred_tie_unresolved. Plurality (this PLATFORM's current default, and NOT a mechanism the DAO framework contains — the word does not appear anywhere in it, and its default is MajorityJudgment; earlier versions of this rule stated that the Radix Network DAO Charter specifies plurality, which is false and is withdrawn): seat the candidates with the highest total approval weight, top N. Spav: repeatedly seat the unelected candidate with the highest score, where each ballot contributes weight / (1 + the number of already-seated candidates that ballot approved). Under both: ties break to the lowest candidate index, a candidate with zero approval weight is never seated, and an Election that missed quorum seats nobody. A candidate who WITHDREW is excluded from the allocation before seats are filled, so the seat passes to the next candidate still standing rather than being left empty; the excluded set is carried in this document as withdrawn_excluded (null = the exclusion was not in force for this election, [] = it was and nobody withdrew), and it cannot move once voting closes because the registry refuses a withdrawal at or after vote_end. Withdrawal does not change any approval total: the ballots are a fact about the electorate and totals keeps reporting them. Verdict: quorum_met = total_weight >= quorum AND voter_count >= min_unique_voters (both legs, exactly as the assertion identifier checks them); for a Binding consultation (options fixed at [Reject, Approve]) approved = quorum_met AND (approve_weight + reject_weight) > 0 AND approve_weight * 100 >= (approve_weight + reject_weight) * approval_threshold_pc (inclusive — the framework's \"meets the approval threshold\", so an exact tie at a 50 bar passes and unanimous YES at a 100 bar passes; a consultation with no decisive votes is not approved) AND approve_weight >= min_affirmative_support; every bar is fixed on-chain at creation and cannot change. Arithmetic: scrypto Decimal (18-decimal fixed point, truncating division). tally_hash = lowercase hex blake2b-256 of the canonical tally document JSON. The weight-source register (weight_sources) and the barred list (excluded_accounts) are the on-ledger sets the consultation registry pinned on this consultation at creation (weight_set_version / excluded_set_version), resolved by version and never from a process environment; a set registered after the consultation exists does not apply to it.",
+  "weight_set_version": 0,
+  "weight_sources": {
+    "native_pools": {
+      "mode": "all"
+    }
+  },
+  "winners": null,
+  "withdrawn_excluded": null
+}
