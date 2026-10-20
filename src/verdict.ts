@@ -24,6 +24,7 @@ import { Dec } from "./decimal.ts";
 import { delegatedWeightByDelegate, resolveDelegations } from "./delegation.ts";
 import type { ResolvedDelegation, SnapshotDelegation } from "./delegation.ts";
 import type { Json } from "./canonical.ts";
+import type { Sides } from "./framework.ts";
 
 /** The five grades of the framework's scale, highest first. Ordinal 0 is Excellent, 4 is
  * Poor — the ordering is load-bearing, since "at or above grade g" is the whole qualifying
@@ -76,12 +77,10 @@ export interface Ballot {
 /** Everything about the consultation the verdict needs, taken from the document. */
 export interface VerdictSpec {
   kind: string;
-  /** Mirror documents (`ballot_source` present) are `kind: "Poll"` yet publish the binary
-   * verdict fields — the mirror rule treats any TWO-option official vote as binding, with the
-   * affirmative side at `For` (index 1) for a temperature check and at option 0 for a proposal.
-   * Set from `ballot_source.kind`;
-   * absent on every non-mirror document. */
-  binarySides?: { affirmative: number; negative: number } | undefined;
+  /** Mirror documents (`ballot_source` present): the sides `decisionSides` found for the
+   * official vote (null = no sides) and whether its parameter set is in the framework table (a
+   * set the table does not name decides nothing). Absent on every non-mirror document. */
+  mirror?: { sides: Sides | null; framework: boolean } | undefined;
   /** Width of the option space — the document's `totals` length. For a Majority Judgment
    * election it is five times the candidate count, because the MJ ballot grades every
    * candidate and `totals` is the raw per-(candidate, grade) distribution. */
@@ -123,6 +122,13 @@ export interface VerdictSpec {
    * difference.
    */
   gradeQuantile: GradeQuantile | null;
+  /**
+   * The floor a Majority Judgment result was allocated under, as a `GRADES` ordinal. Absent is
+   * `MINIMUM_QUALIFYING_GRADE` ("Good"), which every ordinary election uses. A mirror of an
+   * official round passes the round's own `minimum_median_grade` here, exactly as it passes the
+   * document's Grade Quantile.
+   */
+  minimumQualifyingGrade?: number | undefined;
   /**
    * The delegations in force at the snapshot — the document's `delegation_input` (v18), or
    * `null` when the leg was off.
@@ -337,7 +343,7 @@ export function allocateSeatsSpav(
  * The empty ballot (an abstention elsewhere) is invalid here for the same reason: MJ has no
  * abstention.
  */
-function decodeMjBallot(selection: number[], candidateCount: number): number[] | null {
+export function decodeMjBallot(selection: number[], candidateCount: number): number[] | null {
   if (selection.length !== candidateCount) return null;
   const grades: number[] = new Array<number>(candidateCount).fill(-1);
   for (const raw of selection) {
@@ -401,6 +407,7 @@ export function allocateSeatsMajorityJudgment(
   seats: number,
   excluded: number[],
   quantile: GradeQuantile = THREE_FIFTHS,
+  minimumQualifyingGrade: number = MINIMUM_QUALIFYING_GRADE,
 ): MjResult {
   const byGrade: Dec[][] = [];
   for (let c = 0; c < candidateCount; c++) byGrade.push(new Array<Dec>(GRADES.length).fill(Dec.ZERO));
@@ -434,7 +441,7 @@ export function allocateSeatsMajorityJudgment(
   const gaugeClass = (c: MjCandidate): number => c.above.gt(c.below) ? 0 : c.above.eq(c.below) ? 1 : 2;
 
   const ranked = candidates.filter(
-    (c) => !excluded.includes(c.candidateIndex) && c.qualifying !== null && c.qualifying <= MINIMUM_QUALIFYING_GRADE,
+    (c) => !excluded.includes(c.candidateIndex) && c.qualifying !== null && c.qualifying <= minimumQualifyingGrade,
   );
   ranked.sort((a, b) => {
     const byQualifying = (a.qualifying as number) - (b.qualifying as number);
@@ -485,10 +492,14 @@ export function allocateSeatsMajorityJudgment(
  * carry would report every pre-v15 election as a figure difference — the field is absent there
  * because the engine of that vintage did not write it, not because anything disagrees.
  */
-function majorityJudgmentJson(r: MjResult, published: GradeQuantile | null): Json {
+export function majorityJudgmentJson(
+  r: MjResult,
+  published: GradeQuantile | null,
+  minimumQualifyingGrade: number = MINIMUM_QUALIFYING_GRADE,
+): Json {
   return {
     grades: [...GRADES],
-    minimum_qualifying_grade: GRADES[MINIMUM_QUALIFYING_GRADE] as string,
+    minimum_qualifying_grade: GRADES[minimumQualifyingGrade] as string,
     ...(published === null
       ? {}
       : {
@@ -627,35 +638,46 @@ export function deriveFigures(
   // Approve/Reject only mean something for a Binding consultation, whose option list is fixed
   // at [Reject, Approve]. Elsewhere there is no single affirmative side, so the verdict is
   // null rather than invented.
-  // A mirror document is the other binary case: `kind: "Poll"`, sides named by the official
-  // vote's kind (see `VerdictSpec.binarySides`). Its `mas_met` is published as `true` on a
-  // binary vote — the official rule states no MAS floor — so it is reproduced, not recomputed.
+  // A mirror document is the other decided case: `kind: "Poll"`, sides found by LABEL
+  // (`decisionSides`: For/Against on a Temperature Check, Approve/Reject/Abstain on a Proposal),
+  // never by position. A mirror whose parameter set the framework table does not name publishes
+  // its sides' weights but decides nothing: `mas_met` and `approved` are null.
+  // A side the option space does not hold (labels and totals of different lengths) is no side.
+  const inSpace = (i: number | null): boolean => i === null || (i >= 0 && i < totals.length);
+  const claimedSides = spec.mirror?.sides ?? null;
+  const mirrorSides =
+    claimedSides !== null && inSpace(claimedSides.approve) && inSpace(claimedSides.reject) && inSpace(claimedSides.abstain)
+      ? claimedSides
+      : null;
   const sides =
-    totals.length !== 2
-      ? null
-      : spec.kind === "Binding"
+    spec.mirror !== undefined
+      ? mirrorSides === null
+        ? null
+        : { affirmative: mirrorSides.approve, negative: mirrorSides.reject }
+      : totals.length === 2 && spec.kind === "Binding"
         ? { affirmative: 1, negative: 0 }
-        : (spec.binarySides ?? null);
-  const binding = sides !== null;
+        : null;
+  // A mirror's Abstain option is abstention: outside the decisive share, inside participation.
+  if (mirrorSides !== null && mirrorSides.abstain !== null) {
+    abstainWeight = abstainWeight.add(totals[mirrorSides.abstain] ?? Dec.ZERO);
+  }
+  const decides = sides !== null && (spec.mirror === undefined || spec.mirror.framework);
   const approveWeight = sides ? (totals[sides.affirmative] as Dec) : null;
   const rejectWeight = sides ? (totals[sides.negative] as Dec) : null;
-  const masMet = sides
-    ? spec.binarySides
-      ? true
-      : (totals[sides.affirmative] as Dec).gte(spec.minAffirmativeSupport)
-    : null;
-  const approved = sides
-    ? bindingApproved(
-        totals[sides.affirmative] as Dec,
-        totals[sides.negative] as Dec,
-        spec.approvalThresholdPc,
-        spec.minAffirmativeSupport,
-        quorumMet,
-        // The document's own comparison, not this verifier's vintage — the same discipline the
-        // Grade Quantile follows.
-        approvalBarIsInclusive(spec.tallyDocVersion),
-      )
-    : null;
+  const masMet = decides && sides ? (totals[sides.affirmative] as Dec).gte(spec.minAffirmativeSupport) : null;
+  const approved =
+    decides && sides
+      ? bindingApproved(
+          totals[sides.affirmative] as Dec,
+          totals[sides.negative] as Dec,
+          spec.approvalThresholdPc,
+          spec.minAffirmativeSupport,
+          quorumMet,
+          // The document's own comparison, not this verifier's vintage — the same discipline the
+          // Grade Quantile follows.
+          approvalBarIsInclusive(spec.tallyDocVersion),
+        )
+      : null;
 
   // Missing quorum means no winners, not "the winners, but ignore them" — a reader who sees
   // a filled seat list will act on it. Plurality is the fallback when an election names no rule,
@@ -667,6 +689,7 @@ export function deriveFigures(
   let majorityJudgment: Json = null;
   if (election && quorumMet) {
     if (useMj) {
+      const floor = spec.minimumQualifyingGrade ?? MINIMUM_QUALIFYING_GRADE;
       const mj = allocateSeatsMajorityJudgment(
         ballots,
         candidateCount,
@@ -675,9 +698,11 @@ export function deriveFigures(
         // The document's own fraction, or three-fifths when it publishes none. Never a constant
         // chosen here over one the document states.
         spec.gradeQuantile ?? THREE_FIFTHS,
+        // And its own floor: a round's `minimum_median_grade` is set per round.
+        floor,
       );
       winners = mj.winners;
-      majorityJudgment = majorityJudgmentJson(mj, spec.gradeQuantile);
+      majorityJudgment = majorityJudgmentJson(mj, spec.gradeQuantile, floor);
     } else if (spec.seatRule === "Spav") {
       winners = allocateSeatsSpav(ballots, candidateCount, spec.seats, spec.excluded);
     } else {

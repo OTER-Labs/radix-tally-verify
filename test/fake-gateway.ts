@@ -24,13 +24,16 @@ const EMPTY_PAGE = { items: [] };
 export class FakeGateway implements GatewayClient {
   private detailsQueue: unknown[] = [];
   private timestampDetailsQueue: unknown[] = [];
+  private timestampDetailsAt = new Map<string, unknown>();
   private pageResponses = new Map<string, unknown>();
   private validatorsQueue: unknown[] = [];
   private vaultDetailsQueue: unknown[] = [];
   private nonFungiblesByAccount = new Map<string, unknown>();
+  private nonFungibleAmountsByAccount = new Map<string, unknown>();
   private nonFungibleDataByResource = new Map<string, unknown>();
   private kvsKeys = new Map<string, unknown>();
   private kvsData = new Map<string, unknown>();
+  private kvsDataVersioned = new Map<string, Array<{ stateVersion: number; response: unknown }>>();
 
   /** Fail the test on any call the fixture set did not anticipate. */
   calls: string[] = [];
@@ -70,6 +73,14 @@ export class FakeGateway implements GatewayClient {
    * order is the contract.
    */
 
+  /** A timestamp-keyed answer for `entityDetailsAtTimestamp`, consulted before the FIFO queue:
+   * for a test whose point is WHICH instant a bound is resolved from, so that asking for the
+   * wrong one gets the wrong state version instead of whatever happens to be next in line. */
+  onTimestampDetailsAt(unixSeconds: number, response: unknown): this {
+    this.timestampDetailsAt.set(new Date(unixSeconds * 1000).toISOString(), response);
+    return this;
+  }
+
   onVaultDetails(response: unknown): this {
     this.vaultDetailsQueue.push(response);
     return this;
@@ -77,6 +88,12 @@ export class FakeGateway implements GatewayClient {
 
   onNonFungibles(account: string, response: unknown): this {
     this.nonFungiblesByAccount.set(account, response);
+    return this;
+  }
+
+  /** Global-aggregated collection amounts — the Membership weight's read. */
+  onNonFungibleAmounts(account: string, response: unknown): this {
+    this.nonFungibleAmountsByAccount.set(account, response);
     return this;
   }
 
@@ -113,6 +130,15 @@ export class FakeGateway implements GatewayClient {
   ): Promise<unknown> {
     this.calls.push(`non-fungibles:${address}`);
     return Promise.resolve(this.nonFungiblesByAccount.get(address) ?? EMPTY_PAGE);
+  }
+
+  entityNonFungiblesAmountsPage(
+    address: string,
+    _cursor: string | null,
+    _stateVersion: number,
+  ): Promise<unknown> {
+    this.calls.push(`nf-amounts:${address}`);
+    return Promise.resolve(this.nonFungibleAmountsByAccount.get(address) ?? EMPTY_PAGE);
   }
 
   entityNonFungibleVaultsPage(
@@ -152,12 +178,32 @@ export class FakeGateway implements GatewayClient {
     return Promise.resolve(this.kvsKeys.get(kvsAddress) ?? EMPTY_PAGE);
   }
 
+  /** A key-value store's data as the ledger held it FROM `stateVersion` on: a read at state
+   * version S is answered with the response programmed at the greatest version <= S, exactly as
+   * the ledger answers a historical read with the last write at or before it. A read before every
+   * programmed version gets no entry. Once any versioned answer is programmed for an address, the
+   * unversioned `onKvsData` answer for it is never consulted, so a read at the wrong version gets
+   * the wrong state instead of a plausible one. */
+  onKvsDataAt(kvsAddress: string, stateVersion: number, response: unknown): this {
+    const list = this.kvsDataVersioned.get(kvsAddress) ?? [];
+    list.push({ stateVersion, response });
+    list.sort((a, b) => a.stateVersion - b.stateVersion);
+    this.kvsDataVersioned.set(kvsAddress, list);
+    return this;
+  }
+
   keyValueStoreData(
     kvsAddress: string,
     _keys: unknown[],
-    _stateVersion: number,
+    stateVersion: number,
   ): Promise<unknown> {
-    this.calls.push(`kvs-data:${kvsAddress}`);
+    this.calls.push(`kvs-data:${kvsAddress}@${stateVersion}`);
+    const versioned = this.kvsDataVersioned.get(kvsAddress);
+    if (versioned !== undefined) {
+      let answer: unknown = { entries: [] };
+      for (const v of versioned) if (v.stateVersion <= stateVersion) answer = v.response;
+      return Promise.resolve(answer);
+    }
     return Promise.resolve(this.kvsData.get(kvsAddress) ?? { entries: [] });
   }
 
@@ -192,6 +238,8 @@ export class FakeGateway implements GatewayClient {
 
   entityDetailsAtTimestamp(address: string, timestampIso: string): Promise<unknown> {
     this.calls.push(`timestamp-details:${address}:${timestampIso}`);
+    const keyed = this.timestampDetailsAt.get(timestampIso);
+    if (keyed !== undefined) return Promise.resolve(keyed);
     const next = this.timestampDetailsQueue.shift();
     if (next === undefined) {
       throw new GatewayError(`FakeGateway: unexpected entityDetailsAtTimestamp for ${timestampIso}`);

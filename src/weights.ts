@@ -48,8 +48,10 @@
  * and the eighteenth decimal place of a redemption rate is exactly where a float would lie.
  */
 
+import { isPreallocatedAccount } from "./address.ts";
 import {
   WeightRuleError,
+  fetchNonFungibleAmountsAt,
   fetchPositionDataAt,
   fetchPositionIdsAt,
   fetchPrecisionPoolsAt,
@@ -168,6 +170,59 @@ export function concentratedPools(leg: ConcentratedPoolSources | undefined): str
   return leg !== undefined && leg.mode === "allowlist" ? leg.pools : [];
 }
 
+/**
+ * The network an address lives on, from its bech32 prefix: `mainnet` for `…_rdx1…`, `stokenet`
+ * for `…_tdx_2_1…`, and the raw network part for any other Radix network. `null` when the string
+ * does not look like a Radix address at all.
+ */
+export function networkOf(address: string): string | null {
+  const m = /^[a-z]+(?:_[a-z]+)*?_(rdx|sim|loc|tdx_[0-9a-f]+_)1/.exec(address);
+  if (m === null) return null;
+  const hrp = m[1] as string;
+  return hrp === "rdx" ? "mainnet" : hrp === "tdx_2_" ? "stokenet" : hrp;
+}
+
+/** Every address a register names: the legs a gateway on another network cannot answer. */
+export function registerAddresses(sources: WeightSources): string[] {
+  const out: string[] = [];
+  if (sources.native_pools.mode === "allowlist") out.push(...sources.native_pools.pools);
+  if (sources.lsulp !== undefined && sources.lsulp.mode === "component") {
+    out.push(sources.lsulp.component, sources.lsulp.resource);
+  }
+  out.push(...concentratedPools(sources.precision_pools), ...concentratedPools(sources.shape_pools));
+  if (sources.delegation !== undefined && sources.delegation.mode === "component") {
+    out.push(sources.delegation.component);
+  }
+  if (sources.fungible !== undefined) out.push(sources.fungible.resource);
+  if (sources.membership !== undefined) out.push(sources.membership.resource);
+  return out;
+}
+
+/**
+ * A register in the serialized shape a tally document carries it: an off leg is absent, except
+ * `native_pools`, which is always written (`{"mode":"off"}` when off). Two registers that mean the
+ * same thing serialize to the same JSON, whatever spelling either was read from.
+ */
+export function serializeWeightSources(sources: WeightSources): Record<string, unknown> {
+  const np = sources.native_pools;
+  const out: Record<string, unknown> = {
+    native_pools: np.mode === "allowlist" ? { mode: "allowlist", pools: [...np.pools] } : { mode: np.mode },
+  };
+  if (sources.lsulp !== undefined && sources.lsulp.mode === "component") {
+    out["lsulp"] = { mode: "component", component: sources.lsulp.component, resource: sources.lsulp.resource };
+  }
+  for (const leg of ["precision_pools", "shape_pools"] as const) {
+    const named = sources[leg];
+    if (named !== undefined && named.mode === "allowlist") out[leg] = { mode: "allowlist", pools: [...named.pools] };
+  }
+  if (sources.delegation !== undefined && sources.delegation.mode === "component") {
+    out["delegation"] = { mode: "component", component: sources.delegation.component };
+  }
+  if (sources.fungible !== undefined) out["fungible"] = { resource: sources.fungible.resource };
+  if (sources.membership !== undefined) out["membership"] = { resource: sources.membership.resource };
+  return out;
+}
+
 /** What a held fungible turns out to be once looked up at the snapshot. */
 export interface ResourceInfo {
   totalSupply: Dec;
@@ -243,13 +298,43 @@ export async function fetchFungiblesAt(
   gw: GatewayClient,
   addresses: string[],
   stateVersion: number,
+  mustExist: "all" | "preallocated" = "all",
 ): Promise<Map<string, Balances>> {
   const out = new Map<string, Balances>();
   for (let i = 0; i < addresses.length; i += ENTITY_DETAILS_CHUNK) {
     const chunk = addresses.slice(i, i + ENTITY_DETAILS_CHUNK);
     const resp = asObject(await gw.entityDetails(chunk, stateVersion, { global: true, explicitMetadata: [] }));
+    const message = asString(resp["message"]);
+    if (message !== null) {
+      throw new GatewayError(
+        `gateway refused fungible balances at sv ${stateVersion}: ${message}`,
+      );
+    }
+    const items = resp["items"];
+    if (!Array.isArray(items)) {
+      throw new GatewayError(
+        `gateway answered fungible balances at sv ${stateVersion} without items`,
+      );
+    }
+    const returned = new Set(
+      items.map((item) => asString(asObject(item)["address"]) ?? ""),
+    );
+    // A PREALLOCATED account exists at every state version, so the Gateway must answer for it;
+    // an allocated account created after the snapshot is legitimately absent and weighs zero.
+    // An address that does not decode as an account is left to weigh what the answer says.
+    const missing = chunk.filter((address) => {
+      if (returned.has(address)) return false;
+      return mustExist === "all" || isPreallocatedAccount(address);
+    });
+    if (missing.length > 0) {
+      throw new GatewayError(
+        `gateway entity details for fungible balances at sv ${stateVersion} returned ${items.length} ` +
+          `of ${chunk.length} items and left out ${missing.length} that must exist at that state ` +
+          `(${missing.join(", ")}): a short answer is not read as zero`,
+      );
+    }
     const spill: Array<[string, string]> = [];
-    for (const item of asArray(resp["items"])) {
+    for (const item of items) {
       const o = asObject(item);
       const address = asString(o["address"]) ?? "";
       const balances: Balances = new Map();
@@ -315,8 +400,18 @@ function metadataLink(item: Record<string, unknown>, key: string): string | null
  * document, and metadata is mutable by whoever holds the resource's metadata role — a "now" read
  * could move a settled document's classification the first time an issuer renamed their token.
  *
- * Empty string when the resource declares no `symbol` — an absent ticker is a fact about the
- * resource, not an error, mirroring the reference engine's `fetch_resource_symbol_at`.
+ * Empty string ONLY when the Gateway returned the resource and it declares no `symbol` — an
+ * absent ticker is a fact about the resource, and the resource address is in `weight_config`
+ * either way. Two other outcomes must not collapse into that empty string:
+ *
+ *   - a missing item means the Gateway did not answer for the address, and
+ *   - a missing `explicit_metadata.items` block means the `symbol` opt-in was not honoured.
+ *
+ * Both are transient facts about a read, not facts about the resource: defaulting them to `""`
+ * would let a publisher hash `asset_symbol: ""` while a reader whose own read succeeded
+ * recomputes a different ticker. The item is also matched BY ADDRESS, never taken as `items[0]`,
+ * so a response carrying another resource cannot denominate the weights in a ticker nobody
+ * voted with.
  */
 export async function fetchResourceSymbolAt(
   gw: GatewayClient,
@@ -332,8 +427,27 @@ export async function fetchResourceSymbolAt(
       `gateway refused resource details for ${resource} at sv ${stateVersion}: ${message}`,
     );
   }
-  const item = asArray(resp["items"])[0];
-  return item === undefined ? "" : metadataLink(asObject(item), "symbol") ?? "";
+  const items = resp["items"];
+  if (!Array.isArray(items)) {
+    throw new GatewayError(
+      `gateway answered resource details for ${resource} at sv ${stateVersion} without items`,
+    );
+  }
+  const item = items.map((i) => asObject(i)).find((i) => asString(i["address"]) === resource);
+  if (item === undefined) {
+    throw new GatewayError(
+      `gateway returned no entity-details item for resource ${resource} at sv ${stateVersion} — ` +
+        `the ticker this space's weights are denominated in goes inside the hashed document, ` +
+        `so an unread one is a stop, not an empty string`,
+    );
+  }
+  if (!Array.isArray(asObject(item["explicit_metadata"])["items"])) {
+    throw new GatewayError(
+      `gateway returned resource ${resource} at sv ${stateVersion} with no explicit_metadata ` +
+        `block — the symbol opt-in was not honoured`,
+    );
+  }
+  return metadataLink(item, "symbol") ?? "";
 }
 
 /**
@@ -361,7 +475,30 @@ async function fetchResourceInfoAt(
     const resp = asObject(
       await gw.entityDetails(chunk, stateVersion, { global: false, explicitMetadata: ["pool"] }),
     );
-    for (const item of asArray(resp["items"])) {
+    const message = asString(resp["message"]);
+    if (message !== null) {
+      throw new GatewayError(
+        `gateway refused resource details at sv ${stateVersion}: ${message}`,
+      );
+    }
+    const items = resp["items"];
+    if (!Array.isArray(items)) {
+      throw new GatewayError(
+        `gateway answered resource details at sv ${stateVersion} without items`,
+      );
+    }
+    // Every resource asked about was read off a balance or a vault at this same state, so each
+    // one existed then. A resource left out would be valued at zero supply, and an LSU at zero
+    // supply converts to nothing.
+    const returned = new Set(items.map((item) => asString(asObject(item)["address"]) ?? ""));
+    const missing = chunk.filter((resource) => !returned.has(resource));
+    if (missing.length > 0) {
+      throw new GatewayError(
+        `gateway entity details for resource details at sv ${stateVersion} left out ` +
+          `${missing.join(", ")} that existed at that state: a short answer is not read as zero`,
+      );
+    }
+    for (const item of items) {
       const o = asObject(item);
       const address = asString(o["address"]) ?? "";
       const details = asObject(o["details"]);
@@ -541,7 +678,7 @@ export async function computeAccountWeightBreakdown(
   // per-account weight walk exactly.
   if (sources.fungible !== undefined) {
     const resource = sources.fungible.resource;
-    const balances = await fetchFungiblesAt(gw, accounts, snapshotStateVersion);
+    const balances = await fetchFungiblesAt(gw, accounts, snapshotStateVersion, "preallocated");
     for (const account of accounts) {
       const amount = balances.get(account)?.get(resource) ?? Dec.ZERO;
       breakdown.set(account, {
@@ -560,11 +697,14 @@ export async function computeAccountWeightBreakdown(
   }
   if (sources.membership !== undefined) {
     const resource = sources.membership.resource;
-    const held = await fetchPositionIdsAt(gw, accounts, new Set([resource]), snapshotStateVersion);
+    // Membership is decided from the COLLECTION AMOUNT at Global aggregation, never from the
+    // presence of local ids: the ids exist only because of an opt-in, and an opt-in the Gateway
+    // quietly stops honouring would disenfranchise the whole space with no error anywhere. The
+    // amount is reported without any opt-in. One per ACCOUNT, not one per badge.
+    const held = await fetchNonFungibleAmountsAt(gw, accounts, new Set([resource]), snapshotStateVersion);
     for (const account of accounts) {
-      // One per ACCOUNT, not one per badge: a member with a hundred badges weighs 1.
-      const ids = held.get(account)?.get(resource) ?? [];
-      const amount = ids.length > 0 ? Dec.ONE : Dec.ZERO;
+      const count = held.get(account)?.get(resource) ?? 0;
+      const amount = count > 0 ? Dec.ONE : Dec.ZERO;
       breakdown.set(account, {
         xrd: Dec.ZERO,
         lsu: Dec.ZERO,
@@ -580,7 +720,7 @@ export async function computeAccountWeightBreakdown(
     return breakdown;
   }
 
-  const fungibles = await fetchFungiblesAt(gw, accounts, snapshotStateVersion);
+  const fungibles = await fetchFungiblesAt(gw, accounts, snapshotStateVersion, "preallocated");
   const lsuMap = await fetchValidatorLsuMap(gw, snapshotStateVersion);
 
   // The LSULP leg, when the document's register names a pair: one rate for the whole tally,

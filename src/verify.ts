@@ -16,13 +16,15 @@ import type { Json } from "./canonical.ts";
 import { WeightRuleError } from "./concentrated.ts";
 import { Dec } from "./decimal.ts";
 import { DocumentError, parseTallyDocument } from "./document.ts";
-import type { TallyDocument } from "./document.ts";
+import type { PinnedExcludedSet, PinnedWeightSet, TallyDocument } from "./document.ts";
+import type { Sides } from "./framework.ts";
 import { GatewayError } from "./gateway.ts";
 import type { GatewayClient } from "./gateway.ts";
-import { verifyMirrorBallots } from "./mirror.ts";
+import { checkRegisterScope, verifyMirrorBallots } from "./mirror.ts";
 import { deriveFigures } from "./verdict.ts";
 import type { DerivedFigures } from "./verdict.ts";
-import { assetSymbolFor, computeAccountWeights } from "./weights.ts";
+import { assetSymbolFor, computeAccountWeights, serializeWeightSources } from "./weights.ts";
+import { spaceRegisterProblem, weightRuleText, weightSourcesForSpace } from "./weight-rule.ts";
 
 export interface Difference {
   field: string;
@@ -178,11 +180,28 @@ export function compareFigures(doc: TallyDocument, derived: DerivedFigures): Dif
  * checked and the outcome says so — a figure match with an unchecked hash is not the same
  * claim as a full match.
  */
+export interface VerifyOptions {
+  /**
+   * The weight-source set the document's `weight_set_version` names, and its registry's network.
+   * Read only for a mirror document, by check (g); without it the document's own register stands
+   * in for the set.
+   */
+  weightSet?: PinnedWeightSet;
+  /**
+   * The excluded set `excluded_set_version` names. With it, the version and the embedded
+   * `excluded_accounts` list are checked against the registry's set; without it, both are
+   * carried and hashed but not checked (the registry is a different source from the Gateway
+   * endpoints this tool reads).
+   */
+  excludedSet?: PinnedExcludedSet;
+}
+
 export async function verifyTallyDocument(
   input: unknown,
   expectedHash: string | null,
   gw: GatewayClient,
   xrdResource: string,
+  options: VerifyOptions = {},
 ): Promise<Outcome> {
   let doc: TallyDocument;
   let envelopeHash: string | null;
@@ -194,17 +213,66 @@ export async function verifyTallyDocument(
   }
   const hash = expectedHash ?? envelopeHash;
 
+  // Structural consistency that needs no Gateway: the rule text the document states, the
+  // register its space implies, and — when the caller supplied the registry's sets — the
+  // versions and the sets those versions name.
+  const consistencyDifferences: Difference[] = [];
+  const checkConsistent = (field: string, document: string, recomputed: string): void => {
+    if (document !== recomputed) consistencyDifferences.push({ field, document, recomputed });
+  };
+  // The equality is a v22 rule: that is the version whose `weight_rule` the current text
+  // describes. An older document states the rule of its own vintage, which is legitimately not
+  // today's text and is still committed by the hash.
+  if (doc.tallyDocVersion !== null && doc.tallyDocVersion >= 22 && doc.weightRule !== null) {
+    checkConsistent("weight_rule", doc.weightRule, weightRuleText(doc.weightConfig));
+  }
+  const registerProblem = spaceRegisterProblem(doc.weightConfig, doc.weightSources);
+  if (registerProblem !== null) {
+    consistencyDifferences.push({
+      field: "weight_sources",
+      document: registerProblem,
+      recomputed: `the register ${doc.weightConfig.kind} implies`,
+    });
+  }
+  if (options.weightSet !== undefined && !doc.isMirror) {
+    checkConsistent("weight_set_version", String(doc.weightSetVersion), String(options.weightSet.version));
+    const expected = weightSourcesForSpace(doc.weightConfig, options.weightSet.sources);
+    checkConsistent(
+      "weight_sources",
+      canonicalize(serializeWeightSources(doc.weightSources) as unknown as Json),
+      canonicalize(serializeWeightSources(expected) as unknown as Json),
+    );
+  }
+  if (options.excludedSet !== undefined) {
+    checkConsistent("excluded_set_version", String(doc.excludedSetVersion), String(options.excludedSet.version));
+    checkConsistent(
+      "excluded_accounts",
+      canonicalize(doc.excludedAccounts),
+      canonicalize(options.excludedSet.accounts),
+    );
+  }
+
   let mirrorDifferences: Difference[] = [];
   let assetSymbolDifferences: Difference[] = [];
   let derived: DerivedFigures;
   try {
-    // Mirror documents (`ballot_source` present, `src/mirror.ts`) get four extra checks on top of
-    // the pipeline below, which runs unchanged for the fifth (the OTER-rule figures every mirror
+    // Mirror documents (`ballot_source` present, `src/mirror.ts`) get extra checks on top of
+    // the pipeline below, which runs unchanged for (c) (the OTER-rule figures every mirror
     // document already carries at top level, exactly as a Poll would). Run first, in the same
     // try/catch: a gateway or register problem here is exactly as UNKNOWN/MALFORMED as one in the
     // weight recomputation, and the two share the classification below rather than duplicate it.
+    //
+    // Check (g) comes first and touches no gateway: it decides the register the OTER leg is
+    // weighed under — here and in (e) — so that a register address is never sent to a gateway on
+    // another network, whatever the document claims.
+    let oterSources = doc.weightSources;
+    let mirrorSides: Sides | null = null;
     if (doc.isMirror) {
-      mirrorDifferences = await verifyMirrorBallots(doc, gw, xrdResource);
+      const scoped = checkRegisterScope(doc, options.weightSet ?? null);
+      oterSources = scoped.applied;
+      const mirror = await verifyMirrorBallots(doc, gw, xrdResource, oterSources);
+      mirrorSides = mirror.sides;
+      mirrorDifferences = [...scoped.differences, ...mirror.differences];
     }
 
     // Every account whose weight any published figure depends on: the ballots, plus (v18) every
@@ -222,7 +290,7 @@ export async function verifyTallyDocument(
       gw,
       accounts,
       doc.snapshotStateVersion,
-      doc.weightSources,
+      oterSources,
       xrdResource,
     );
 
@@ -252,12 +320,17 @@ export async function verifyTallyDocument(
         excluded: doc.withdrawnExcluded ?? [],
         excludedAccounts: doc.excludedAccounts,
         gradeQuantile: doc.gradeQuantile,
+        minimumQualifyingGrade: doc.minimumQualifyingGrade,
         delegationInput: doc.delegationInput,
         tallyDocVersion: doc.tallyDocVersion,
-        binarySides: doc.ballotSource
-          ? doc.ballotSource.kind === "temperature_check"
-            ? { affirmative: 1, negative: 0 }
-            : { affirmative: 0, negative: 1 }
+        // A mirror's `min_affirmative_support` and `min_unique_voters` are the document's own;
+        // check (f) has already compared both against the re-read parameter set. Its sides come
+        // from the ON-CHAIN option labels (check (a) compares the document's against them).
+        mirror: doc.ballotSource
+          ? {
+              sides: mirrorSides,
+              framework: doc.ballotSource.framework !== null,
+            }
           : undefined,
       },
       doc.votes,
@@ -275,7 +348,12 @@ export async function verifyTallyDocument(
     throw e;
   }
 
-  const differences = [...mirrorDifferences, ...assetSymbolDifferences, ...compareFigures(doc, derived)];
+  const differences = [
+    ...consistencyDifferences,
+    ...mirrorDifferences,
+    ...assetSymbolDifferences,
+    ...compareFigures(doc, derived),
+  ];
   if (differences.length > 0) return { kind: "figures", differences };
 
   // Figures agree. Only now does the byte-level question matter: is the document's canonical

@@ -13,6 +13,7 @@ import { TALLY_DOC_VERSION } from "../src/document.ts";
 import { GatewayError } from "../src/gateway.ts";
 import type { GatewayClient } from "../src/gateway.ts";
 import { verifyTallyDocument } from "../src/verify.ts";
+import { XRD_WEIGHT_RULE } from "../src/weight-rule.ts";
 
 import { ACCOUNT_A, ACCOUNT_B, XRD, scenarioGateway } from "./fake-gateway.ts";
 
@@ -29,7 +30,7 @@ function goodDocument(): Record<string, Json> {
     snapshot_state_version: 1000000,
     vote_start: 1754000000,
     vote_end: 1754604800,
-    weight_rule: "weight(account) = XRD + LSUs at redemption + verified pool units (see spec)",
+    weight_rule: XRD_WEIGHT_RULE,
     weight_sources: { native_pools: { mode: "all" } },
     votes: [
       { account: ACCOUNT_A, selection: [1], weight: "125" },
@@ -79,6 +80,9 @@ class DeadGateway implements GatewayClient {
     return Promise.reject(new GatewayError("unreachable"));
   }
   entityNonFungiblesPage(): Promise<unknown> {
+    return Promise.reject(new GatewayError("unreachable"));
+  }
+  entityNonFungiblesAmountsPage(): Promise<unknown> {
     return Promise.reject(new GatewayError("unreachable"));
   }
   entityNonFungibleVaultsPage(): Promise<unknown> {
@@ -267,6 +271,8 @@ function v14Document(): Record<string, Json> {
   const doc = goodDocument();
   doc["tally_doc_version"] = 14;
   delete doc["excluded_accounts"];
+  // The rule text of that vintage, which is not today's and is still inside the hash.
+  doc["weight_rule"] = "weight(account) = XRD + LSUs at redemption + verified pool units (see spec)";
   return doc;
 }
 

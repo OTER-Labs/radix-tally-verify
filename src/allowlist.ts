@@ -4,7 +4,7 @@
  * A mirror tally publishes two readings of the same official ballots. One of them is meant to
  * reproduce the OFFICIAL number, so it has to apply the official rule — and that rule is not
  * "liquid XRD". The app (`vote.radixdao.org/about/voting-power`) states it as: direct XRD; the
- * stake units of every active validator at their underlying XRD; LSULP at its underlying
+ * stake units of every validator at their underlying XRD; LSULP at its underlying
  * liquid-staked XRD; and the XRD/LSU/LSULP side of a **static allowlist of DEX liquidity
  * positions** — "This is the current static allowlist used when a vote is snapshotted." The
  * first two are constitutional (the governance framework's Tier 1) and are counted

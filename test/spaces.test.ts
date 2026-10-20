@@ -271,21 +271,11 @@ test("asset_symbol \"\" MATCHes when the resource declares no symbol", async () 
  * metadata for the v22 `asset_symbol` check. */
 function membershipGateway(symbol = "MEMBER"): FakeGateway {
   return new FakeGateway()
-    .onNonFungibles(ACCOUNT_A, {
-      items: [
-        {
-          resource_address: MEMBERSHIP_RESOURCE,
-          vaults: { items: [{ vault_address: "internal_vault_rdx1a", items: ["#1#", "#2#"] }] },
-        },
-      ],
+    .onNonFungibleAmounts(ACCOUNT_A, {
+      items: [{ resource_address: MEMBERSHIP_RESOURCE, amount: 2 }],
     })
-    .onNonFungibles(ACCOUNT_B, {
-      items: [
-        {
-          resource_address: MEMBERSHIP_RESOURCE,
-          vaults: { items: [{ vault_address: "internal_vault_rdx1b", items: ["#3#"] }] },
-        },
-      ],
+    .onNonFungibleAmounts(ACCOUNT_B, {
+      items: [{ resource_address: MEMBERSHIP_RESOURCE, amount: 1 }],
     })
     .onDetails(symbolDetails(MEMBERSHIP_RESOURCE, symbol));
 }
@@ -327,11 +317,11 @@ test("a Membership-space document: MATCH end to end, hash checked", async () => 
   const gw = membershipGateway();
   const outcome = await verifyTallyDocument(doc, hash(doc), gw, XRD);
   assert.deepEqual(outcome, { kind: "match", hashChecked: true });
-  // Short-circuited: one non-fungible page per account, the symbol check, nothing else (no
-  // fungibles, no validators).
+  // Short-circuited: one Global-aggregated collection-amount page per account, the symbol
+  // check, nothing else (no fungibles, no validators, no local-id walk).
   assert.deepEqual(gw.calls, [
-    `non-fungibles:${ACCOUNT_A}`,
-    `non-fungibles:${ACCOUNT_B}`,
+    `nf-amounts:${ACCOUNT_A}`,
+    `nf-amounts:${ACCOUNT_B}`,
     `details:${MEMBERSHIP_RESOURCE}`,
   ]);
 });

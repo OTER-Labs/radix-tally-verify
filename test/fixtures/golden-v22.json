@@ -1,0 +1,12 @@
+{
+  "version": 22,
+  "consultation_id": "golden-v22",
+  "space_id": 7,
+  "weight_config": {
+    "kind": "Fungible",
+    "resource": "resource_rdx1t4golden"
+  },
+  "term_seconds": 31536000,
+  "asset_symbol": "TAHU",
+  "total_weight": "1000"
+}
