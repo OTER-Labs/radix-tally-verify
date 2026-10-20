@@ -1,6 +1,6 @@
 {
   "name": "radix-tally-verify",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Independently recompute a Radix governance consultation's tally from Gateway state and check it against the hash committed on-ledger.",
   "type": "module",
   "license": "Apache-2.0",
@@ -10,8 +10,15 @@
   "bin": {
     "radix-tally-verify": "./dist/src/cli.js"
   },
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    }
+  },
   "scripts": {
     "build": "tsc",
+    "prepare": "tsc",
     "test": "node --test --experimental-strip-types test/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
