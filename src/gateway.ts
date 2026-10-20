@@ -79,6 +79,20 @@ export interface GatewayClient {
     cursor: string | null,
     stateVersion: number,
   ): Promise<unknown>;
+  /**
+   * POST /state/entity/page/non-fungibles at `aggregation_level: "Global"` — the collection's
+   * own `amount` per resource, with NO `non_fungible_include_nfids` opt-in.
+   *
+   * The Membership space's weight is "did this account hold at least one", and `amount` is
+   * reported without any opt-in. The local-id walk behind `entityNonFungiblesPage` depends on
+   * an opt-in the Gateway can silently ignore, which would make every member weigh zero with
+   * no error anywhere; this call cannot fail that way.
+   */
+  entityNonFungiblesAmountsPage(
+    address: string,
+    cursor: string | null,
+    stateVersion: number,
+  ): Promise<unknown>;
   /** POST /state/entity/page/non-fungible-vaults — spends a per-RESOURCE vault cursor. */
   entityNonFungibleVaultsPage(
     address: string,
@@ -112,6 +126,83 @@ export interface GatewayClient {
     keys: unknown[],
     stateVersion: number,
   ): Promise<unknown>;
+}
+
+/**
+ * Refuse a Gateway answer that is not a state answer at the state the read asked for.
+ *
+ * Three kinds of answer are refused, matching the reference engine's rule:
+ *
+ *   1. An ERROR ENVELOPE (`{message, code, …}`), whatever HTTP status carried it. Read as data
+ *      it has no `items`, and every walk over it would weigh the accounts it asked about at
+ *      zero.
+ *   2. An answer with no positive `ledger_state.state_version`. Every `/state/*` endpoint says
+ *      which ledger state it answered at; a body without one cannot be placed at the state the
+ *      walk asked for.
+ *   3. An answer at ANOTHER state than the one asked for: a read pinned by `state_version` must
+ *      answer at exactly that version; one pinned by `timestamp` must answer at or before the
+ *      instant (its `proposer_round_timestamp` is checked); one pinned by `epoch` must answer in
+ *      that epoch or before.
+ *
+ * What is NOT refused is a short or empty `items` list. Whether a missing item is legitimate
+ * depends on what the address is, so each caller decides — see `fetchFungiblesAt`'s
+ * preallocated-account rule.
+ */
+export function refuseGatewayAnswer(endpoint: string, payload: unknown, body: unknown): void {
+  const o = asObject(body);
+  const message = asString(o["message"]);
+  if (message !== null) {
+    const code = o["code"];
+    throw new GatewayError(
+      `gateway refused ${endpoint}: ${message}` +
+        (typeof code === "number" || typeof code === "string" ? ` (code ${String(code)})` : ""),
+    );
+  }
+  const ledger = asObject(o["ledger_state"]);
+  const answered = ledger["state_version"];
+  if (typeof answered !== "number" || !Number.isSafeInteger(answered) || answered <= 0) {
+    throw new GatewayError(
+      `gateway answered ${endpoint} with no ledger_state.state_version: a body that does not ` +
+        `say which state it describes is not read as data`,
+    );
+  }
+  const asked = asObject(asObject(payload)["at_ledger_state"]);
+  const wantedVersion = asked["state_version"];
+  if (typeof wantedVersion === "number") {
+    if (answered !== wantedVersion) {
+      throw new GatewayError(
+        `gateway answered ${endpoint} at state version ${answered}, but the read asked for ` +
+          `state version ${wantedVersion}: an answer at another state is not the state asked for`,
+      );
+    }
+    return;
+  }
+  const wantedTimestamp = asked["timestamp"];
+  if (typeof wantedTimestamp === "string") {
+    const wantedMs = Date.parse(wantedTimestamp);
+    if (!Number.isFinite(wantedMs)) {
+      throw new GatewayError(`${endpoint}: the read's own timestamp ${wantedTimestamp} does not parse`);
+    }
+    const at = asString(ledger["proposer_round_timestamp"]);
+    const answeredMs = at === null ? NaN : Date.parse(at);
+    if (!Number.isFinite(answeredMs) || answeredMs > wantedMs) {
+      throw new GatewayError(
+        `gateway answered ${endpoint} at state version ${answered} (ledger time ` +
+          `${JSON.stringify(at)}), but the read asked for the last state at or before ${wantedTimestamp}`,
+      );
+    }
+    return;
+  }
+  const wantedEpoch = asked["epoch"];
+  if (typeof wantedEpoch === "number") {
+    const epoch = ledger["epoch"];
+    if (typeof epoch !== "number" || epoch > wantedEpoch) {
+      throw new GatewayError(
+        `gateway answered ${endpoint} at state version ${answered} in epoch ` +
+          `${JSON.stringify(epoch)}, but the read asked for the start of epoch ${wantedEpoch}`,
+      );
+    }
+  }
 }
 
 export class RadixGateway implements GatewayClient {
@@ -149,11 +240,14 @@ export class RadixGateway implements GatewayClient {
         res.status,
       );
     }
+    let body: unknown;
     try {
-      return JSON.parse(text) as unknown;
+      body = JSON.parse(text) as unknown;
     } catch {
       throw new GatewayError(`gateway returned non-JSON for ${path}`, res.status);
     }
+    refuseGatewayAnswer(path, payload, body);
+    return body;
   }
 
   entityDetails(
@@ -213,6 +307,20 @@ export class RadixGateway implements GatewayClient {
       address,
       aggregation_level: "Vault",
       opt_ins: { non_fungible_include_nfids: true },
+      at_ledger_state: { state_version: stateVersion },
+    };
+    if (cursor !== null) payload["cursor"] = cursor;
+    return this.post("/state/entity/page/non-fungibles", payload);
+  }
+
+  entityNonFungiblesAmountsPage(
+    address: string,
+    cursor: string | null,
+    stateVersion: number,
+  ): Promise<unknown> {
+    const payload: Record<string, unknown> = {
+      address,
+      aggregation_level: "Global",
       at_ledger_state: { state_version: stateVersion },
     };
     if (cursor !== null) payload["cursor"] = cursor;

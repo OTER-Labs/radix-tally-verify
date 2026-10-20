@@ -29,6 +29,7 @@ export class FakeGateway implements GatewayClient {
   private validatorsQueue: unknown[] = [];
   private vaultDetailsQueue: unknown[] = [];
   private nonFungiblesByAccount = new Map<string, unknown>();
+  private nonFungibleAmountsByAccount = new Map<string, unknown>();
   private nonFungibleDataByResource = new Map<string, unknown>();
   private kvsKeys = new Map<string, unknown>();
   private kvsData = new Map<string, unknown>();
@@ -90,6 +91,12 @@ export class FakeGateway implements GatewayClient {
     return this;
   }
 
+  /** Global-aggregated collection amounts — the Membership weight's read. */
+  onNonFungibleAmounts(account: string, response: unknown): this {
+    this.nonFungibleAmountsByAccount.set(account, response);
+    return this;
+  }
+
   onNonFungibleData(resource: string, response: unknown): this {
     this.nonFungibleDataByResource.set(resource, response);
     return this;
@@ -123,6 +130,15 @@ export class FakeGateway implements GatewayClient {
   ): Promise<unknown> {
     this.calls.push(`non-fungibles:${address}`);
     return Promise.resolve(this.nonFungiblesByAccount.get(address) ?? EMPTY_PAGE);
+  }
+
+  entityNonFungiblesAmountsPage(
+    address: string,
+    _cursor: string | null,
+    _stateVersion: number,
+  ): Promise<unknown> {
+    this.calls.push(`nf-amounts:${address}`);
+    return Promise.resolve(this.nonFungibleAmountsByAccount.get(address) ?? EMPTY_PAGE);
   }
 
   entityNonFungibleVaultsPage(

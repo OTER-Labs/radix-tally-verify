@@ -81,6 +81,9 @@ class DeadGateway implements GatewayClient {
   entityNonFungiblesPage(): Promise<unknown> {
     return Promise.reject(new GatewayError("unreachable"));
   }
+  entityNonFungiblesAmountsPage(): Promise<unknown> {
+    return Promise.reject(new GatewayError("unreachable"));
+  }
   entityNonFungibleVaultsPage(): Promise<unknown> {
     return Promise.reject(new GatewayError("unreachable"));
   }

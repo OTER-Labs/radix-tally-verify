@@ -930,6 +930,109 @@ export async function fetchPositionIdsAt(
   return out;
 }
 
+/** One page's reported amount of a wanted collection, as a non-negative safe integer. */
+function nonFungibleAmountFromItem(item: Record<string, unknown>, what: string): number {
+  const raw = item["amount"];
+  if (raw !== undefined && raw !== null) {
+    if (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw < 0) {
+      throw new GatewayError(`${what} reports amount ${JSON.stringify(raw)}, not a non-negative integer`);
+    }
+    return raw;
+  }
+  const vaults = asObject(item["vaults"]);
+  const items = vaults["items"];
+  if (!Array.isArray(items)) return 0;
+  let total = 0;
+  for (const vault of items) {
+    const count = asObject(vault)["total_count"];
+    if (count === undefined || count === null) continue;
+    if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 0) {
+      throw new GatewayError(`${what} reports total_count ${JSON.stringify(count)}, not a non-negative integer`);
+    }
+    total += count;
+    if (!Number.isSafeInteger(total)) {
+      throw new GatewayError(`${what} amounts overflow the safe integer range`);
+    }
+  }
+  return total;
+}
+
+/**
+ * HOW MANY non-fungibles of each wanted resource each account held at the snapshot, read from
+ * the collection listing at Global aggregation.
+ *
+ * The Membership weight function is "did the account hold at least one", and a collection's
+ * own `amount` is reported without any opt-in. The local-id walk is deliberately not used:
+ * its ids exist only because of `non_fungible_include_nfids`, and a Gateway that silently stops
+ * honouring that opt-in would return no ids and no error — every member would weigh zero and
+ * the whole space would settle Reject with nothing to show for it. A vault-aggregated page (a
+ * Gateway that ignored `aggregation_level`) reports per-vault `total_count` instead; both
+ * shapes are read so the count never silently becomes zero. Ids are never consulted.
+ *
+ * Fails closed on a non-advancing cursor, a page overflow, and an amount that is not a
+ * non-negative safe integer.
+ */
+export async function fetchNonFungibleAmountsAt(
+  gw: GatewayClient,
+  accounts: string[],
+  wanted: Set<string>,
+  stateVersion: number,
+): Promise<Map<string, Map<string, number>>> {
+  const out = new Map<string, Map<string, number>>();
+  if (wanted.size === 0) return out;
+  for (const account of accounts) {
+    let cursor: string | null = null;
+    for (let page = 0; page < MAX_NON_FUNGIBLE_PAGES; page++) {
+      const resp = asObject(await gw.entityNonFungiblesAmountsPage(account, cursor, stateVersion));
+      const message = asString(resp["message"]);
+      if (message !== null) {
+        throw new GatewayError(
+          `gateway refused non-fungible amounts of ${account} at sv ${stateVersion}: ${message}`,
+        );
+      }
+      const items = resp["items"];
+      if (!Array.isArray(items)) {
+        throw new GatewayError(
+          `gateway answered non-fungible amounts of ${account} at sv ${stateVersion} without items`,
+        );
+      }
+      for (const item of items) {
+        const o = asObject(item);
+        const resource = asString(o["resource_address"]);
+        if (resource === null || !wanted.has(resource)) continue;
+        const amount = nonFungibleAmountFromItem(o, `non-fungible amounts of ${account} at sv ${stateVersion}`);
+        let byResource = out.get(account);
+        if (byResource === undefined) {
+          byResource = new Map<string, number>();
+          out.set(account, byResource);
+        }
+        const sum = (byResource.get(resource) ?? 0) + amount;
+        if (!Number.isSafeInteger(sum)) {
+          throw new GatewayError(
+            `non-fungible amounts of ${resource} for ${account} at sv ${stateVersion} overflow the safe integer range`,
+          );
+        }
+        byResource.set(resource, sum);
+      }
+      const next = asString(resp["next_cursor"]);
+      if (next === null) break;
+      if (next === cursor) {
+        throw new GatewayError(
+          `gateway returned a non-advancing non-fungible amounts cursor for ${account} at sv ${stateVersion}`,
+        );
+      }
+      cursor = next;
+      if (page + 1 === MAX_NON_FUNGIBLE_PAGES) {
+        throw new GatewayError(
+          `non-fungible amounts of ${account} at sv ${stateVersion} did not end within ` +
+            `${MAX_NON_FUNGIBLE_PAGES} pages`,
+        );
+      }
+    }
+  }
+  return out;
+}
+
 /**
  * The data of named position ids, at the snapshot. Returns only ids that HAVE data there; a
  * burned position has none and contributes zero.
