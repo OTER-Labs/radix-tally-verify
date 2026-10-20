@@ -156,7 +156,7 @@ function mjDocument(over: Record<string, unknown> = {}, ballotSourceOver: Record
       official_snapshot: OFFICIAL_SNAPSHOT,
       official_parameter_set: {
         id: "dao-election",
-        label: "Majority Judgement Election",
+        label: "Majority Judgment Election",
         version: 1,
         variant: "MajorityJudgment",
       },
@@ -253,7 +253,7 @@ function temperatureCheckEntry(): unknown {
                 kind: "Tuple",
                 fields: [
                   s("id", "dao-election"),
-                  s("label", "Majority Judgement Election"),
+                  s("label", "Majority Judgment Election"),
                   s("version", "1"),
                   {
                     field_name: "parameters",

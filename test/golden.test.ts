@@ -35,7 +35,7 @@ const V22_CANONICAL =
 const V22_HASH = "5962fc7e825bb75c52fda7ab43ef217b29bc674fa401cb1e38f9b6d33ffdecfc";
 
 const TC_HASH = "c71d6eda9871cc1c1621aced25ab8292160c164cf66e27259c26afd42c3f7055";
-const MJ_HASH = "9285d443f056f323d5a7b3336e64d3f559f24bd039e2cb0ab4f9adb4f82f7baa";
+const MJ_HASH = "58c133e8993b4092a8fe909de1f4a02d8f29f2999e015b323fd07bd840f4c5cd";
 
 const q = (s: string): string => JSON.stringify(s);
 

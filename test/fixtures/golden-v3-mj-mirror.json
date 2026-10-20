@@ -30,7 +30,7 @@
     "official_outcome": null,
     "official_parameter_set": {
       "id": "dao-election",
-      "label": "Majority Judgement Election",
+      "label": "Majority Judgment Election",
       "variant": "MajorityJudgment",
       "version": 1
     },
