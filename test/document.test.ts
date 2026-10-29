@@ -55,8 +55,8 @@ function v20Document(over: Record<string, unknown> = {}): Record<string, unknown
   };
 }
 
-test("TALLY_DOC_VERSION is 22; 21 is not reused", () => {
-  assert.equal(TALLY_DOC_VERSION, 22);
+test("TALLY_DOC_VERSION is 23; 21 is not reused", () => {
+  assert.equal(TALLY_DOC_VERSION, 23);
   assert.notEqual(TALLY_DOC_VERSION, 21);
 });
 

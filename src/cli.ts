@@ -4,6 +4,7 @@
  *
  *   radix-tally-verify <tally.json | -> [--gateway URL] [--tally-hash HEX] [--xrd-resource ADDR]
  *                      [--weight-set FILE] [--excluded-set FILE] [--hash-only]
+ *                      [--reread-ballots]
  *
  * `--weight-set` supplies the weight-source set `weight_set_version` names, as
  * `{"network", "weight_set_version", "weight_sources"}`, and `--excluded-set` supplies the barred
@@ -11,6 +12,10 @@
  * `{"excluded_set_version", "excluded_accounts"}`. With them, both versions and both embedded
  * lists are checked against the registry sets they claim; without them they are carried and
  * hashed but not checked.
+ *
+ * `--reread-ballots` re-reads the sealed ballot box's `SealedBallotCastEvent` stream for a v23
+ * sealed vote and compares it with the document's `votes` and `late_ballots` — the one check on a
+ * sealed tally that reads the ledger's own record of the ballots.
  *
  * `--hash-only` parses the document and prints its canonical bytes and tally hash without any
  * Gateway read — the offline encoding check, and how the golden vectors are verified.
@@ -33,8 +38,9 @@ import {
   parsePinnedWeightSet,
   parseTallyDocument,
 } from "./document.ts";
-import type { PinnedExcludedSet, PinnedWeightSet } from "./document.ts";
-import { RadixGateway } from "./gateway.ts";
+import type { PinnedExcludedSet, PinnedWeightSet, TallyDocument } from "./document.ts";
+import { compareSealedBallotEvents, streamSealedBallotEvents } from "./events.ts";
+import { GatewayError, RadixGateway } from "./gateway.ts";
 import { verifyTallyDocument } from "./verify.ts";
 
 const MAINNET_XRD = "resource_rdx1tknxxxxxxxxxradxrdxxxxxxxxx009923554798xxxxxxxxxradxrd";
@@ -49,11 +55,12 @@ interface Args {
   weightSet: string | null;
   excludedSet: string | null;
   hashOnly: boolean;
+  rereadBallots: boolean;
 }
 
 function usage(): never {
   process.stderr.write(
-    "usage: radix-tally-verify <tally.json | -> [--gateway URL] [--tally-hash HEX] [--xrd-resource ADDR] [--weight-set FILE] [--excluded-set FILE] [--hash-only]\n",
+    "usage: radix-tally-verify <tally.json | -> [--gateway URL] [--tally-hash HEX] [--xrd-resource ADDR] [--weight-set FILE] [--excluded-set FILE] [--hash-only] [--reread-ballots]\n",
   );
   process.exit(4);
 }
@@ -66,6 +73,7 @@ function parseArgs(argv: string[]): Args {
   let weightSet: string | null = null;
   let excludedSet: string | null = null;
   let hashOnly = false;
+  let rereadBallots = false;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i] as string;
     if (
@@ -84,6 +92,8 @@ function parseArgs(argv: string[]): Args {
       else xrdResource = v;
     } else if (a === "--hash-only") {
       hashOnly = true;
+    } else if (a === "--reread-ballots") {
+      rereadBallots = true;
     } else if (a.startsWith("--")) {
       usage();
     } else if (file === null) {
@@ -93,7 +103,7 @@ function parseArgs(argv: string[]): Args {
     }
   }
   if (file === null) usage();
-  return { file, gateway, tallyHash, xrdResource, weightSet, excludedSet, hashOnly };
+  return { file, gateway, tallyHash, xrdResource, weightSet, excludedSet, hashOnly, rereadBallots };
 }
 
 /** The XRD resource address follows the network, which the gateway URL names. An unknown
@@ -185,8 +195,10 @@ async function main(): Promise<void> {
   // v22: echo which space/term this document claims, ahead of the verdict — a no-op on any
   // document that verifies wrong, and on any document this parse itself refuses (verifyTallyDocument
   // reports that below as MALFORMED; there is nothing to echo yet).
+  let parsedDoc: TallyDocument | null = null;
   try {
     const { doc } = parseTallyDocument(input);
+    parsedDoc = doc;
     const config =
       doc.weightConfig.kind === "Xrd" ? "Xrd" : `${doc.weightConfig.kind}:${doc.weightConfig.resource}`;
     process.stdout.write(
@@ -194,6 +206,50 @@ async function main(): Promise<void> {
     );
   } catch (e) {
     if (!(e instanceof DocumentError)) throw e;
+  }
+
+  // v23: re-read the box's own ballot events and compare them with the document's ballot list.
+  // Runs before the tally verification: it needs no weight read, and a ledger disagreement it
+  // finds is a definite finding whatever the Gateway would say about weights.
+  if (args.rereadBallots && parsedDoc !== null) {
+    const sealedDoc = parsedDoc;
+    if (sealedDoc.sealed === null) {
+      process.stderr.write("MALFORMED: --reread-ballots needs a v23 sealed tally document\n");
+      process.exit(4);
+    }
+    let events;
+    try {
+      // The snapshot is at or before vote_start and the box exists before the consultation, so
+      // no ballot can be older than it.
+      events = await streamSealedBallotEvents(
+        args.gateway,
+        sealedDoc.sealed.box,
+        sealedDoc.snapshotStateVersion,
+      );
+    } catch (e) {
+      if (e instanceof GatewayError) {
+        process.stdout.write(
+          "UNKNOWN — the box's ballot stream could not be read. This says nothing about the tally.\n" +
+            `  ${e.message}\n`,
+        );
+        process.exit(3);
+      }
+      throw e;
+    }
+    const differences = compareSealedBallotEvents(events, sealedDoc);
+    if (differences.length > 0) {
+      process.stdout.write(
+        `FIGURES DISAGREE — the ballot list differs from the box's events: ${differences.length} difference(s).\n`,
+      );
+      for (const d of differences) {
+        process.stdout.write(`  ${d.field}: document ${d.document} != ledger ${d.recomputed}\n`);
+      }
+      process.exit(1);
+    }
+    const forVote = events.filter((e) => e.consultationId === sealedDoc.consultationId).length;
+    process.stdout.write(
+      `reread: ${forVote} sealed ballot event(s) match votes and late_ballots.\n`,
+    );
   }
 
   const outcome = await verifyTallyDocument(

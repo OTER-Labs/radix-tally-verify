@@ -1,0 +1,90 @@
+{
+  "_comment": "Quicknet tlock ballots for the sealed-ballot core (sealed.rs). Each ciphertext was made once with `cd backend/tools/tlock-encrypt && npm ci && node encrypt.mjs 0 \"$PLAINTEXT\" <round>`. `expected` is open_ballot then validate_plaintext against consultation_id, account and rules below, with round 1000's signature (round_1000.json).",
+  "consultation_id": "7",
+  "account": "account_tdx_2_12yf9gd53yfep7a669fv2t3wm7nz9zeezwd04n02a433ker8vza6rhe",
+  "round": 1000,
+  "rules": {
+    "abstain_allowed": true,
+    "max_selections": 3,
+    "candidate_count": 0,
+    "majority_judgment": false,
+    "option_count": 3
+  },
+  "ballots": [
+    {
+      "name": "valid_approval",
+      "plaintext": "oter-sealed-ballot-v1\n7\naccount_tdx_2_12yf9gd53yfep7a669fv2t3wm7nz9zeezwd04n02a433ker8vza6rhe\n0,2",
+      "round": 1000,
+      "ciphertext": "-----BEGIN AGE ENCRYPTED FILE-----\nYWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHRsb2NrIDEwMDAgNTJkYjliYTcwZTBj\nYzBmNmVhZjc4MDNkZDA3NDQ3YTFmNTQ3NzczNWZkM2Y2NjE3OTJiYTk0NjAwYzg0\nZTk3MSA1YWJmZjNlMTgxNjNiMDUzYjg2YjIyNTE5MGFkNzFhOTBkMjc3YThmM2E4\nOTBiNmE3MGVmNTZkNmFiNDY2ZjdiCnBBampvYVN0aWNUZ1pRc1ZRTUJ3UkJrNFRa\nWlR0YVVaQUhTekQ5NUxsS0N0bG1QcFNjc2lKc1JkMHNUak1XZnoKQWliNFpwYzBW\nZXRobzB1bWZ1UGFoMFJKMkErOVhWUEJya1VZOGhpQ255cG03SnY1MWhNeEc4SkFE\nYUY2MndOcQpOZWc3S2hEd0xlR0hWR0NDdU1uaDgzZ2htSkg4THVSTURSbmVrUG9V\nRzRvCi0tLSByRW5iWFNxajZRL28waE90WXNtSENuL2x0SGtJc1JlTlJUaW9TRE9P\nYUs4ClltUmZZ1D8kuP26lPyljPXXBi3QiUduWw5cZdijgn2TRaFqf319PV2vbO3v\nHg6c5HyLR6CrB3oQkpK9NDsYF11nEoRTM4Ddvikw02eaxblfGLU75b63nCiq7+Q6\n4HcaIVrBscktz/l/YaZiX6hv+8JHwToEqIpfUvse5YKy96ye6Q==\n-----END AGE ENCRYPTED FILE-----\n",
+      "expected": {
+        "ok": [
+          0,
+          2
+        ]
+      }
+    },
+    {
+      "name": "abstention",
+      "plaintext": "oter-sealed-ballot-v1\n7\naccount_tdx_2_12yf9gd53yfep7a669fv2t3wm7nz9zeezwd04n02a433ker8vza6rhe\n",
+      "round": 1000,
+      "ciphertext": "-----BEGIN AGE ENCRYPTED FILE-----\nYWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHRsb2NrIDEwMDAgNTJkYjliYTcwZTBj\nYzBmNmVhZjc4MDNkZDA3NDQ3YTFmNTQ3NzczNWZkM2Y2NjE3OTJiYTk0NjAwYzg0\nZTk3MSBkMjMyYjExMGQ4ZWUyZTgwNzA1ZDU5YTY3YTRjZDFkYjYzNjEwM2I2Yzc4\nZDRmZGM0MTE2NjMyODJkNjFiZjY3CnM2WmdUaHFvU2RYN2pMOWIzby9vdWQ4ODFH\nbmlHa21ibVMxeWw2eG1LckJWcTNQWDMxR2lXN21kUGcyaHZZVVUKQnN3d0pGVFNM\ndzVFM2hiRWh1SlovSUtMeWkzYVEvd0x2UEFVbElmbkhpY0JZZys0N3Rtd1lWcUdK\nallKN0FXLwpGRzI5Qm9uT3ZZNm1OUC82UStRQTlVdXJIYitDZ3ZoTm1iK2lJSlli\nd1FjCi0tLSA3UUxWWVRZNExLS25MRTIvR2JtZWRTMU55aGd5TUowY3NrUkhYUDVE\nNWdnChzpT/rJDZNrWy4ldtsmf5+FU7n+Riys/thpzNq3faotQiQC2HpUVJWBzvAh\nxZ99iSmZJYX2IIQGtBVSk8XEr/vJNfplBf2u146f1ym01WyOoZ8yR13qOJy3x4U+\nrUVv0ixd8XRXr/hUuyWxvAOjPb0AzwxBm3gL+48FojLHMQ==\n-----END AGE ENCRYPTED FILE-----\n",
+      "expected": {
+        "ok": []
+      }
+    },
+    {
+      "name": "another_consultation",
+      "plaintext": "oter-sealed-ballot-v1\n8\naccount_tdx_2_12yf9gd53yfep7a669fv2t3wm7nz9zeezwd04n02a433ker8vza6rhe\n0,2",
+      "round": 1000,
+      "ciphertext": "-----BEGIN AGE ENCRYPTED FILE-----\nYWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHRsb2NrIDEwMDAgNTJkYjliYTcwZTBj\nYzBmNmVhZjc4MDNkZDA3NDQ3YTFmNTQ3NzczNWZkM2Y2NjE3OTJiYTk0NjAwYzg0\nZTk3MSBjNTZjNDFkZDFjYjZlMWQ0MjY5MzdhODUzZGZiMmIyMTUyMGNmYTY3YzI2\nMmZmNDE2ZGRkYTE0MDAwNDA4OWExCmpadW5nSHVrMzhQYzNnK2JSbTg4VG9TNU1k\nc3Q2RUpNUFF2ckp5WUMyM3cvcGFEL2NQeXJjbHlrdmc5TkFVaEsKR0orT2N6UHdT\nV0Y0RFFoWGh6RlFwT0dYc1R6NnA3R1QxaGZGbjF5T0pLZ0hxTytsVnFHNDNEb1kx\nbm9YTU96cQp3VnVITmdqMElzNDlvcXRRQ211dlI5V3AyODFqNUhkZW1GSUdtdFFm\nYmVzCi0tLSB4NytEVHRKUmx4TWJzWGpZVHlybjVxVlhzZjQ4YWF6UHh1MERPaTd1\naG9zCiHEdztMME7EoqJ/t8JcbfQBGYZuBQaFncr3L4+cLKXC9Duch99QpTFrHA9X\nhPsStY7/eu7GYKi//jcZaFMCXq01c0BxjChx4gVbZ37z3Z3+8+F1sW1ulSnkbYvY\njOLU25OnYUx/K6rfOZB2zvrJo42fRDcRDpoNtZ3jxM6CPpMwew==\n-----END AGE ENCRYPTED FILE-----\n",
+      "expected": {
+        "invalid": "wrong_vote"
+      }
+    },
+    {
+      "name": "another_account",
+      "plaintext": "oter-sealed-ballot-v1\n7\naccount_tdx_2_129x5uj99s5aka9ctqevg3zp8uyz03x6nfy3lghjfne73py0r0w077x\n0,2",
+      "round": 1000,
+      "ciphertext": "-----BEGIN AGE ENCRYPTED FILE-----\nYWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHRsb2NrIDEwMDAgNTJkYjliYTcwZTBj\nYzBmNmVhZjc4MDNkZDA3NDQ3YTFmNTQ3NzczNWZkM2Y2NjE3OTJiYTk0NjAwYzg0\nZTk3MSA2ZDlhMmM1NzRjMjRhODBiMzY2MGY2MzIxY2JjZTJiMTU0MTk1Y2VjYWVm\nYTc5ZTBmNGI3NjAzMmY2ZmVlYzNiCnBubUdqWVhHUnQxMWJHazJjUGUwallzOXU2\nM1dlZ3NqRW03MU9Pd3JKSVdjODRoSW1TZ2JaT1RQb2QyWWxNZEUKQzRVS1U0S3ZV\nazFTMzkzTjU0cmNZR01SNUEwaUdJQTRNQTRubTU5cVBzdXhTVkFyd3JUYUl1WnZk\nNU5OUkNvWgoyc3QwbEJzdFZMdUlQeHIxVHU1ajNyd1dPVnF5RHptM2gzTHBsZ2xq\nM2pnCi0tLSBjSENwQWVLZEFjZnY1ZTZtc0tLT0tBRHBmbXI4NGIzRnBHQUMxRDFK\nUFRRCthTsBq0fNHcmB+pS6VgcTyRNK7nbj137pGOe/4lPvs+DZRyhmEgO+/MRsGb\n7ockm4MkkVDlWgh+UcraU894sbSVoLN14Dim4qpGvST2yzMApqvIYB4InUevqT2X\n+6S79jYQcuXPqL1vTgWoQ+XAFi6JivzAMQxOrnm+B7BpxwaE9w==\n-----END AGE ENCRYPTED FILE-----\n",
+      "expected": {
+        "invalid": "wrong_vote"
+      }
+    },
+    {
+      "name": "not_increasing",
+      "plaintext": "oter-sealed-ballot-v1\n7\naccount_tdx_2_12yf9gd53yfep7a669fv2t3wm7nz9zeezwd04n02a433ker8vza6rhe\n2,0",
+      "round": 1000,
+      "ciphertext": "-----BEGIN AGE ENCRYPTED FILE-----\nYWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHRsb2NrIDEwMDAgNTJkYjliYTcwZTBj\nYzBmNmVhZjc4MDNkZDA3NDQ3YTFmNTQ3NzczNWZkM2Y2NjE3OTJiYTk0NjAwYzg0\nZTk3MSAyM2Y1MDE1YTk5MGI4ZDdiYjM2NGYyNzFlMzcwNjFlZGM2ZGJkNjQyMjNm\nNzU0NmU3ZmMzNzQxNDEwNTM3NDU0Cm1DaGdoQnNONStNQy9vbXpsT1VjYlcrQ2JZ\nMVZsU3ZGZ0ZIcjVHMndPVFRXa2V2UmJ1WHU0QWJOa2tYVWdCbU8KRnoxRi9jTm9E\nK2dDM3VrN1hRaE5RL1ZrVzhFQ0dqT294YkYzbkpPT1h3TlBiRHdDREhVejUyQ0tw\nYWYzd25lcApTajFsd0RWbEw4OFhucCtLYXRiVUZVdFZ1UjFZSU9takM2c3JZZE9m\nYmdZCi0tLSA2ajc5T2JPZE5zck54WUdKZEx2MHE4UzhhTytsMzc3NXFhMW93aEtJ\ncE9FCuxoyChlxdAcLYmeoIRpGiDlKDF/DY5UvYob49L+ezEWBjAsvQi/Jd7k/21M\n3YcHSnj2blkAoApfOf/JyU15uyYwcbTFEX91rlfOLtEcJNFTdH32rjB5QlZS/nZy\nBUtlgrhFJHodGf7eX72vXtAJ7gwp/2idYDpQe1S0h5ZAwNPzDg==\n-----END AGE ENCRYPTED FILE-----\n",
+      "expected": {
+        "invalid": "invalid_selection"
+      }
+    },
+    {
+      "name": "leading_zero",
+      "plaintext": "oter-sealed-ballot-v1\n7\naccount_tdx_2_12yf9gd53yfep7a669fv2t3wm7nz9zeezwd04n02a433ker8vza6rhe\n01",
+      "round": 1000,
+      "ciphertext": "-----BEGIN AGE ENCRYPTED FILE-----\nYWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHRsb2NrIDEwMDAgNTJkYjliYTcwZTBj\nYzBmNmVhZjc4MDNkZDA3NDQ3YTFmNTQ3NzczNWZkM2Y2NjE3OTJiYTk0NjAwYzg0\nZTk3MSA4OGE4NjY3YzY4Mzk2ZmE0YTdmYzYzMWJiZjA1ZjdlN2I1MzhhZWRhZGMz\nOGFlM2EyYjcxMWY4YTgyYzlhOWIxCm91RVl5Y0pqaDh0QXZ1NnB3K0pPa0dLTnVM\nZjVnY2xEZlgrS0h1cGN4Q2p5eVlQWlJ4Zncrd3kybnl2dS80ZVcKQk9xaVgweHpj\nVldZWTJMYS9LbnUzdXduUDNNenFWU3JUNWdHOXJBVWc5dUtZVC9PaGVBd21IR1FO\nNldRZjRRLwpMcHhkSmtIWDM1T3ZkUlhhWUpJZi9xV3J6QTB4QUs0cm90ZlFWekFH\nSjdZCi0tLSBnRFVsUWtUOGt4eWZjd0ZvTW1JR010K2VjYTY0ckJCaUx6aFU5aXBD\nZ3pJCqLl1GTSfZiYlpUpoACbkPNTuIiCKRqQkU5vT0Y5JIiSTSb+gnGwONGG7YKU\nOCokHH7NFfOFy2JouBHzFX33ERdIPAmOdfZ1mb8gAucOeYE8IWVEZTIoK02sU17z\nBZXNzHMdRWyu27BCu/UaD+K0otS4XmcURcE2QtWdBnQPBtjM\n-----END AGE ENCRYPTED FILE-----\n",
+      "expected": {
+        "invalid": "malformed"
+      }
+    },
+    {
+      "name": "trailing_newline",
+      "plaintext": "oter-sealed-ballot-v1\n7\naccount_tdx_2_12yf9gd53yfep7a669fv2t3wm7nz9zeezwd04n02a433ker8vza6rhe\n0,2\n",
+      "round": 1000,
+      "ciphertext": "-----BEGIN AGE ENCRYPTED FILE-----\nYWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHRsb2NrIDEwMDAgNTJkYjliYTcwZTBj\nYzBmNmVhZjc4MDNkZDA3NDQ3YTFmNTQ3NzczNWZkM2Y2NjE3OTJiYTk0NjAwYzg0\nZTk3MSA4OTA5MTU2ZjM0NTA1MmM4MzFiOTcwMmIyZWQwZTU1NmYyOGViOTZjM2Zj\nZDVlNjEwODFmOTQxZTA4NGYzOTdjCmhsQVl2OWVMRFJIM1JUbEZReVc5ZUQ0Mkht\nMGNKMzRBODh2a3pIaitkek1mQjNhaDg0OGkyL3Z5K3lhQmtLNnAKQkxJNmlIRDZW\najNuWXhuazdWendqWnF5K0EyemdsMG1OUVN6elh1ZzRaVWNIUWhzY2NocDhLcjBO\nUCt3NXNrVAp6bHZmUmtWOUZhL2tpa00xbW9mREtIemU4bTR3eFduNjhKYnBzWkdo\nR1NFCi0tLSBtNFZFaHNKNjVNaWQ2OVVvdjlPQ0tLaXlrdndjeGJOblZST0xoTGJX\na0lBCmYStNphSxVgBFqrKx9se3dkzpse+U4GKXkNki5JndfPTOQgumY8F01z+380\nARmYWUKf6r+AlVoxNDinIL4/UZqbo+wdIHE0pL6j3nwTncD/I983zNUNkPcOJ5a4\ni32QxVfEjpx7fETAPvwXK25/3dK/454GqcqM/TiH/KIGYRBbMgs=\n-----END AGE ENCRYPTED FILE-----\n",
+      "expected": {
+        "invalid": "malformed"
+      }
+    },
+    {
+      "name": "sealed_to_round_1001",
+      "plaintext": "oter-sealed-ballot-v1\n7\naccount_tdx_2_12yf9gd53yfep7a669fv2t3wm7nz9zeezwd04n02a433ker8vza6rhe\n0,2",
+      "round": 1001,
+      "ciphertext": "-----BEGIN AGE ENCRYPTED FILE-----\nYWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHRsb2NrIDEwMDEgNTJkYjliYTcwZTBj\nYzBmNmVhZjc4MDNkZDA3NDQ3YTFmNTQ3NzczNWZkM2Y2NjE3OTJiYTk0NjAwYzg0\nZTk3MSA4ZmFhODVmMmIwYzNhNWEwNDhmNmUxMWFmNjEyMWNhNjQzN2RjODc1MWZk\nZTY4NDc0YzVlYWY1NmY1NmQ5ZDlkCmlKUkRUMy9VeE5JNUh1amoxRTByQTFGWVo5\neDFwakR0dC9penJ4Y3hJdmFBMWxBRllnaUhGeEU3K1Y3M1hvZWkKR0U3dkZmOGlr\na0QwaHBJUVhBVG1nSFdaMDJSU1dPcnpacGE3c2NabXI0L2JOdXlZTEsrdnNaUDBv\nSlREazBsMQpNMWM5TFNvcnFPNUg2Ukpqdit3VTRMVGJVT3lmMklWUENyWWIxOHNI\nN3p3Ci0tLSB2Vzk3aWtYcFBlRmN0THNsdzBZc00yY1ZJZ3BZRHA2RVZzbVVVd2p6\ndlQ4Cv4YZJ/I5C14H9RczviTm9g9jHEJHwdtQ30LELJ897THTBD9Jtm/iQUllUWE\nGJwfv8p9rVDfD7wGZxZUn+aUUtLS3NbV4MfR0fdA4mqUgI4qAWAYnjt/pABojQnx\nQkgUgUsymOTgzrpI8OVJz/PMW+sJ7JzYdshyAiQ+J78Jnh/hSw==\n-----END AGE ENCRYPTED FILE-----\n",
+      "expected": {
+        "invalid": "wrong_round"
+      }
+    }
+  ]
+}

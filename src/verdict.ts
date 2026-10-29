@@ -551,7 +551,7 @@ export function majorityJudgmentJson(
  */
 export function deriveFigures(
   spec: VerdictSpec,
-  votes: Array<{ account: string; selection: number[] }>,
+  votes: Array<{ account: string; selection: number[]; sealedInvalid?: string | null }>,
   weights: Map<string, Dec>,
 ): DerivedFigures {
   const useMj = spec.kind === "Election" && spec.seatRule === "MajorityJudgment";
@@ -609,6 +609,14 @@ export function deriveFigures(
     const weight = delegations === null ? own : own.add(delegatedHere);
     voteDelegatedWeight.push(delegations === null ? null : delegatedHere);
     voteEffectiveWeight.push(delegations === null ? null : weight);
+    // v23: a sealed ballot the engine ruled INVALID counts toward nothing — not an option, not
+    // total_weight, not voter_count, not abstain_weight, not a grade, and not the allocator.
+    // It is still the account's latest timely ballot and is still rendered (weighed like an
+    // excluded one) so the reason can be checked; the `continue` is before the ballot list for
+    // the same reason it is before every accumulator. Delegated weight rides this ballot and
+    // shares its fate, and the account still appears in `voted`, so its own delegation (if any)
+    // is revoked by the act of voting.
+    if (vote.sealedInvalid !== undefined && vote.sealedInvalid !== null) continue;
     // In the ballot list even when invalid: the allocator has to SEE an invalid ballot to report
     // it. `ballotIndex` keeps the report naming positions in the document's `votes`, which the
     // barred ballots above have already made non-consecutive.

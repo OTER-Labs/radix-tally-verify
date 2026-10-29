@@ -17,6 +17,8 @@ import type { Json } from "./canonical.ts";
 import { asArray, asObject, asString } from "./gateway.ts";
 import { GRADES, MINIMUM_QUALIFYING_GRADE } from "./verdict.ts";
 import type { GradeQuantile } from "./verdict.ts";
+import type { SealedInvalid } from "./sealed.ts";
+import { SEALED_INVALID_REASONS } from "./sealed.ts";
 import { networkOf, registerAddresses } from "./weights.ts";
 import type {
   ConcentratedPoolSources,
@@ -63,6 +65,14 @@ import type {
  *     is Xrd (or the document predates v22), present names the ONE resource the weight rule
  *     replaces the whole XRD sum with — not an extra leg added on top, but the sole source, so a
  *     Fungible or Membership document's every other leg is off. No shape change to anything else.
+ *   - **23 — SEALED VOTES.** A consultation may be sealed: ballots are tlock ciphertexts opened
+ *     after their drand round, off-chain. A top-level `sealed` block (`box`, `box_package`,
+ *     `box_recognised`, `round`, `round_time`, `round_margin_seconds`, `chain_hash`,
+ *     `public_key`, `signature`), per-vote `ciphertext` / `intent_hash` / `timestamp` and
+ *     `sealed_invalid` (a reason, absent when valid), and `late_ballots` (account, intent hash,
+ *     timestamp, ciphertext). Present only on a sealed vote, so an open document differs from
+ *     v22 only by the version and the rule text. The weight rule itself gains the sealed
+ *     sentences, which is why every document's hash moves.
  *
  *   - **mirror tallies** — the additive `ballot_source` block
  *     that turns a document into a reproduction of an official Radix DAO Temperature Check or
@@ -83,7 +93,7 @@ import type {
  * recomputed at the Grade Quantile it publishes. A verifier that applied today's comparison to
  * every document would report correct historical tallies as lies.
  */
-export const TALLY_DOC_VERSION = 22;
+export const TALLY_DOC_VERSION = 23;
 
 /**
  * v22: how a SPACE turns holdings into weight — the registry's `weight_config`, denormalised
@@ -325,6 +335,54 @@ export interface TallyVote {
   delegatedWeight: Dec | null;
   /** `weight + delegated_weight` — what this ballot actually carried (v18). */
   effectiveWeight: Dec | null;
+  /**
+   * v23: the ballot's armored tlock ciphertext, `null` on every open vote. Carried inside the
+   * hash so the ballot can be decrypted again by anyone; the verifier opens it and compares the
+   * decoded selection (and, when invalid, the reason) with what the document publishes.
+   */
+  ciphertext: string | null;
+  /** v23: the intent hash of the transaction that cast the ballot; `null` on an open vote. */
+  intentHash: string | null;
+  /** v23: the ledger timestamp the box stamped on the event, in epoch seconds — what the late
+   * cut reads. `null` on an open vote. */
+  timestamp: number | null;
+  /**
+   * v23: why this sealed ballot was invalid, or `null` when it is valid. An invalid ballot is
+   * still the account's latest timely ballot and is still rendered (weighed, like an excluded
+   * one) so the reason can be checked, but it reaches no option, no weight and no voter count.
+   */
+  sealedInvalid: SealedInvalid | null;
+}
+
+/**
+ * v23: the sealed-vote block, present only on a sealed vote.
+ *
+ * `box_recognised` is the registry's claim that the box's package is a known
+ * `sealed_ballot_box_v1` package. An unrecognised box counts no ballots: its honest tally is the
+ * empty one, and the block carries no round.
+ */
+export interface SealedBlock {
+  box: string;
+  boxPackage: string | null;
+  boxRecognised: boolean;
+  /** The drand round the ballots are sealed to; `null` on an unrecognised box. */
+  round: number | null;
+  /** The round's wall clock; `null` on an unrecognised box. */
+  roundTime: number | null;
+  roundMarginSeconds: number;
+  chainHash: string;
+  publicKey: string;
+  /** The round's drand signature, verified before any ballot is opened; `null` on an
+   * unrecognised box. */
+  signature: string | null;
+}
+
+/** v23: a ballot the box recorded at or after `round_time`. It counts toward nothing. */
+export interface SealedLateBallot {
+  account: string;
+  intentHash: string;
+  timestamp: number;
+  ciphertext: string;
 }
 
 /** One entry of the document's published `delegations` resolution. */
@@ -404,7 +462,24 @@ export interface TallyDocument {
    */
   weightSetVersion: number | null;
   excludedSetVersion: number | null;
+  /**
+   * The voting deadline, in epoch seconds — `null` only on a document that omits it. Read for
+   * one purpose: a sealed vote's drand round is derived from `vote_end + round_margin_seconds`
+   * (spec §1), and the verifier checks the published round and round_time against that formula.
+   */
+  voteEnd: number | null;
   votes: TallyVote[];
+  /**
+   * v23: the sealed-vote block, `null` on every open vote. Presence is the switch that turns on
+   * the sealed checks — signature, decryption, validity, the late cut — exactly as `ballot_source`
+   * switches on the mirror checks.
+   */
+  sealed: SealedBlock | null;
+  /**
+   * v23: the box's ballots recorded at or after `round_time`, `null` on an open vote and `[]`
+   * when a sealed vote drew none late. Reported, decryptable, and counted toward nothing.
+   */
+  lateBallots: SealedLateBallot[] | null;
   /**
    * The delegations in force at the snapshot (v18) — a trusted input, `null` when the leg was
    * off. See `src/delegation.ts`.
@@ -422,6 +497,12 @@ export interface TallyDocument {
   approvalThresholdPc: Dec;
   minAffirmativeSupport: Dec;
   minUniqueVoters: number;
+  /**
+   * Whether an EMPTY selection is castable — `cast_vote`'s abstention rule, fixed at creation.
+   * Carried inside the hash on every document; `null` only when a document omits it. Read for
+   * v23's sealed validity check, where it is the first selection rule.
+   */
+  abstainAllowed: boolean | null;
   quorumMet: boolean;
   masMet: boolean | null;
   seats: number;
@@ -499,13 +580,22 @@ function optDec(doc: Record<string, unknown>, field: string): Dec | null {
 }
 
 /** An integer field that arrived in a later version: absent is `null`, not an error. */
-function optInt(doc: Record<string, unknown>, field: string): number | null {
+function optInt(doc: Record<string, unknown>, field: string, path: string = field): number | null {
   const v = doc[field];
   if (v === null || v === undefined) return null;
   if (typeof v !== "number" || !Number.isSafeInteger(v)) {
-    fail(field, "is neither absent nor a safe integer");
+    fail(path, "is neither absent nor a safe integer");
   }
   return v;
+}
+
+/** A string field that arrived in a later version: absent is `null`, not an error. */
+function optString(doc: Record<string, unknown>, field: string, path: string = field): string | null {
+  const v = doc[field];
+  if (v === null || v === undefined) return null;
+  const s = asString(v);
+  if (s === null) fail(path, "is neither absent nor a string");
+  return s;
 }
 
 function reqInt(doc: Record<string, unknown>, field: string, path: string = field): number {
@@ -540,6 +630,68 @@ function optIntArray(v: unknown, field: string): number[] | null {
     out.push(x);
   }
   return out;
+}
+
+function parseSealedInvalid(v: unknown, path: string): SealedInvalid | null {
+  if (v === null || v === undefined) return null;
+  const s = asString(v);
+  if (s === null || !(SEALED_INVALID_REASONS as readonly string[]).includes(s)) {
+    fail(path, `is neither absent nor one of ${SEALED_INVALID_REASONS.join(", ")}`);
+  }
+  return s as SealedInvalid;
+}
+
+/**
+ * v23: the `sealed` block. Absent is an open vote. A recognised box must name its round, the
+ * round's wall clock and the signature; an unrecognised box is the exact complement (spec §6.4),
+ * and carrying round fields would make `box_recognised: false` and a counted tally contradict
+ * each other in the same hashed document.
+ */
+function parseSealedBlock(raw: unknown): SealedBlock | null {
+  if (raw === undefined || raw === null) return null;
+  const o = asObject(raw);
+  const box = reqString(o, "box", "sealed.box");
+  const boxPackage = optString(o, "box_package", "sealed.box_package");
+  const boxRecognised = reqBool(o, "box_recognised");
+  const round = optInt(o, "round", "sealed.round");
+  const roundTime = optInt(o, "round_time", "sealed.round_time");
+  const roundMarginSeconds = reqInt(o, "round_margin_seconds", "sealed.round_margin_seconds");
+  const chainHash = reqString(o, "chain_hash", "sealed.chain_hash");
+  const publicKey = reqString(o, "public_key", "sealed.public_key");
+  const signature = optString(o, "signature", "sealed.signature");
+  if (boxRecognised) {
+    if (round === null) fail("sealed.round", "is missing on a recognised box");
+    if (roundTime === null) fail("sealed.round_time", "is missing on a recognised box");
+    if (signature === null) fail("sealed.signature", "is missing on a recognised box");
+  } else if (round !== null || roundTime !== null || signature !== null) {
+    fail("sealed", "carries round fields for an unrecognised box");
+  }
+  return {
+    box,
+    boxPackage,
+    boxRecognised,
+    round,
+    roundTime,
+    roundMarginSeconds,
+    chainHash,
+    publicKey,
+    signature,
+  };
+}
+
+/** v23: the `late_ballots` list — present (possibly empty) on a sealed vote, absent otherwise. */
+function parseLateBallots(raw: unknown): SealedLateBallot[] | null {
+  if (raw === undefined || raw === null) return null;
+  if (!Array.isArray(raw)) fail("late_ballots", "is neither absent nor an array");
+  return raw.map((entry, i) => {
+    const o = asObject(entry);
+    return {
+      account: reqString(o, "account", `late_ballots[${i}].account`),
+      intentHash: reqString(o, "intent_hash", `late_ballots[${i}].intent_hash`),
+      timestamp: reqInt(o, "timestamp", `late_ballots[${i}].timestamp`),
+      ciphertext: reqString(o, "ciphertext", `late_ballots[${i}].ciphertext`),
+    };
+  });
 }
 
 function parseWeightSources(raw: unknown): WeightSources {
@@ -1289,6 +1441,10 @@ export function parseTallyDocument(input: unknown): { doc: TallyDocument; envelo
       excluded: excludedRaw === true,
       delegatedWeight,
       effectiveWeight,
+      ciphertext: optString(o, "ciphertext", `votes[${i}].ciphertext`),
+      intentHash: optString(o, "intent_hash", `votes[${i}].intent_hash`),
+      timestamp: optInt(o, "timestamp", `votes[${i}].timestamp`),
+      sealedInvalid: parseSealedInvalid(o["sealed_invalid"], `votes[${i}].sealed_invalid`),
     };
   });
 
@@ -1301,6 +1457,24 @@ export function parseTallyDocument(input: unknown): { doc: TallyDocument; envelo
     : (optIntArray(winnersRaw, "winners") as number[]);
 
   const ballotSource = parseBallotSource(raw["ballot_source"]);
+
+  // v23. The sealed block and its per-vote fields travel together: a sealed vote's every ballot
+  // must carry the ciphertext, intent hash and timestamp the verifier opens and cuts on, and a
+  // late list without a sealed block cannot be placed in time.
+  const sealed = parseSealedBlock(raw["sealed"]);
+  const lateBallots = parseLateBallots(raw["late_ballots"]);
+  if (sealed === null && lateBallots !== null) {
+    fail("late_ballots", "is present on a document with no sealed block");
+  }
+  if (sealed !== null) {
+    if (lateBallots === null) fail("late_ballots", "is missing on a sealed vote");
+    for (let i = 0; i < votes.length; i++) {
+      const vote = votes[i] as TallyVote;
+      if (vote.ciphertext === null || vote.intentHash === null || vote.timestamp === null) {
+        fail(`votes[${i}]`, "is missing ciphertext, intent_hash or timestamp on a sealed vote");
+      }
+    }
+  }
 
   // v22. Every one of the four is additive and absent-means-default, so a v20 document (or a
   // mirror document, which the reference engine writes with the space-0 constants explicitly)
@@ -1337,7 +1511,10 @@ export function parseTallyDocument(input: unknown): { doc: TallyDocument; envelo
     excludedAccounts: parseExcludedAccounts(raw["excluded_accounts"]),
     weightSetVersion: optInt(raw, "weight_set_version"),
     excludedSetVersion: optInt(raw, "excluded_set_version"),
+    voteEnd: optInt(raw, "vote_end"),
     votes,
+    sealed,
+    lateBallots,
     delegationInput: parseDelegationInput(raw["delegation_input"]),
     delegations: parseDelegations(raw["delegations"]),
     delegatedWeightTotal: optDec(raw, "delegated_weight_total"),
@@ -1349,6 +1526,7 @@ export function parseTallyDocument(input: unknown): { doc: TallyDocument; envelo
     approvalThresholdPc: reqDec(raw, "approval_threshold_pc"),
     minAffirmativeSupport: reqDec(raw, "min_affirmative_support"),
     minUniqueVoters: reqInt(raw, "min_unique_voters"),
+    abstainAllowed: optBool(raw, "abstain_allowed"),
     quorumMet: reqBool(raw, "quorum_met"),
     masMet: optBool(raw, "mas_met"),
     seats: reqInt(raw, "seats"),

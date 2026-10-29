@@ -21,6 +21,14 @@ import type { Sides } from "./framework.ts";
 import { GatewayError } from "./gateway.ts";
 import type { GatewayClient } from "./gateway.ts";
 import { checkRegisterScope, verifyMirrorBallots } from "./mirror.ts";
+import {
+  QUICKNET_CHAIN,
+  openBallot,
+  sealingRound,
+  validatePlaintext,
+  verifyRoundSignature,
+} from "./sealed.ts";
+import type { SealedInvalid, SelectionRules } from "./sealed.ts";
 import { deriveFigures } from "./verdict.ts";
 import type { DerivedFigures } from "./verdict.ts";
 import { assetSymbolFor, computeAccountWeights, serializeWeightSources } from "./weights.ts";
@@ -173,6 +181,169 @@ export function compareFigures(doc: TallyDocument, derived: DerivedFigures): Dif
 }
 
 /**
+ * Every sealed-vote claim (v23) that can be checked without the Gateway: the drand chain and the
+ * published signature, the round formula of spec §1, each ballot's ciphertext opened and its
+ * validity recomputed, and the late cut. Returns the differences; an empty list is a document
+ * whose sealed claims hold.
+ *
+ * The checks are ordered so a document that is wrong at the top (another chain, a signature that
+ * does not verify) stops there instead of burying the one real finding under a decrypt error per
+ * ballot: nothing can be opened with a file key the signature did not produce.
+ */
+export async function compareSealedClaims(doc: TallyDocument): Promise<Difference[]> {
+  const sealed = doc.sealed;
+  if (sealed === null) return [];
+  const diffs: Difference[] = [];
+  const check = (field: string, document: string, recomputed: string): void => {
+    if (document !== recomputed) diffs.push({ field, document, recomputed });
+  };
+
+  // An unrecognised box counts NO ballots (spec §6.4). The verifier cannot re-read the registry
+  // to confirm recognition, but it can refuse a document whose own claim and ballot list
+  // contradict each other: `box_recognised: false` beside a counted ballot cannot be honest.
+  if (!sealed.boxRecognised) {
+    check(
+      "sealed.box_recognised (with ballots)",
+      doc.votes.length === 0 ? "no counted ballots" : `${doc.votes.length} counted ballot(s)`,
+      "no counted ballots",
+    );
+    check(
+      "late_ballots (with an unrecognised box)",
+      (doc.lateBallots?.length ?? 0) === 0 ? "none" : `${doc.lateBallots?.length ?? 0} late ballot(s)`,
+      "none",
+    );
+    return diffs;
+  }
+
+  // The chain is quicknet and nothing else (spec §10): the chain hash is checked against the
+  // published info, and the public key with it, because a signature verified against a key this
+  // verifier does not know proves nothing about the ballots' timelock.
+  const chainOk =
+    sealed.chainHash.toLowerCase() === QUICKNET_CHAIN.chainHash &&
+    sealed.publicKey.toLowerCase() === QUICKNET_CHAIN.publicKey;
+  check("sealed.chain_hash", sealed.chainHash.toLowerCase(), QUICKNET_CHAIN.chainHash);
+  check("sealed.public_key", sealed.publicKey.toLowerCase(), QUICKNET_CHAIN.publicKey);
+  if (!chainOk) return diffs;
+
+  const round = sealed.round as number;
+  const roundTime = sealed.roundTime as number;
+  const signature = sealed.signature as string;
+
+  // T = vote_end + margin; round = floor((T - genesis) / period) + 1 (spec §1). Every layer
+  // computes it, so a document that publishes another round or round_time is not this vote's.
+  if (doc.voteEnd === null) {
+    check("sealed.round_time", String(roundTime), "vote_end is absent from the document");
+  } else {
+    try {
+      const expected = sealingRound(doc.voteEnd, sealed.roundMarginSeconds, QUICKNET_CHAIN);
+      check("sealed.round", String(round), String(expected.round));
+      check("sealed.round_time", String(roundTime), String(expected.roundTime));
+    } catch (e) {
+      check("sealed.round_time", String(roundTime), e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  // The signature is checked before anything is decrypted: a wrong signature makes every ballot
+  // undecryptable, and reporting that as many findings would hide the one that matters.
+  if (!(await verifyRoundSignature(QUICKNET_CHAIN, round, signature))) {
+    diffs.push({
+      field: "sealed.signature",
+      document: signature,
+      recomputed: `does not verify for round ${round} against sealed.public_key`,
+    });
+    return diffs;
+  }
+
+  // One timely ballot per account is the engine's latest-on-ledger rule; a document listing an
+  // account twice would count its weight twice.
+  const seen = new Set<string>();
+  for (let i = 0; i < doc.votes.length; i++) {
+    const account = (doc.votes[i] as (typeof doc.votes)[number]).account;
+    if (seen.has(account)) {
+      diffs.push({
+        field: `votes[${i}].account (${account})`,
+        document: "a duplicate ballot",
+        recomputed: "one timely ballot per account",
+      });
+    }
+    seen.add(account);
+  }
+
+  // The selection rules `cast_vote` applies. The document does not carry `max_selections` (it
+  // does not on an open vote either), so the approval cap the creator chose cannot be checked
+  // here; `optionCount` is the tightest bound the range and ordering rules already imply and
+  // adds nothing of its own. `candidate_count` under Majority Judgment is derived from the
+  // totals width, as the verdict already derives it.
+  const majorityJudgment = doc.kind === "Election" && doc.seatRule === "MajorityJudgment";
+  const optionCount = doc.options.length > 0 ? doc.options.length : doc.totals.length;
+  const candidateCount = majorityJudgment ? doc.totals.length / 5 : 0;
+  const rules: SelectionRules = {
+    abstainAllowed: doc.abstainAllowed ?? true,
+    maxSelections: optionCount,
+    candidateCount,
+    majorityJudgment,
+    optionCount,
+  };
+  if (doc.abstainAllowed === null) {
+    diffs.push({
+      field: "abstain_allowed",
+      document: "absent",
+      recomputed: "the rule a sealed ballot's abstention is checked against",
+    });
+  }
+
+  for (let i = 0; i < doc.votes.length; i++) {
+    const vote = doc.votes[i] as (typeof doc.votes)[number];
+    // The late cut: a ballot at or after round_time is late, and late ballots count nothing.
+    // A `votes` row at or after round_time is the replacement the rule forbids.
+    if (vote.timestamp !== null && vote.timestamp >= roundTime) {
+      check(
+        `votes[${i}].timestamp (${vote.account})`,
+        String(vote.timestamp),
+        `before round_time (${roundTime})`,
+      );
+    }
+    const opened = await openBallot(vote.ciphertext as string, QUICKNET_CHAIN, round, signature);
+    let reason: SealedInvalid | null = null;
+    let decoded: number[] | null = null;
+    if (!opened.ok) {
+      reason = opened.reason;
+    } else {
+      const validated = validatePlaintext(
+        opened.plaintext,
+        doc.consultationId,
+        vote.account,
+        rules,
+      );
+      if (validated.ok) decoded = validated.selection;
+      else reason = validated.reason;
+    }
+    const published = vote.sealedInvalid ?? "valid";
+    check(`votes[${i}].sealed_invalid (${vote.account})`, published, reason ?? "valid");
+    if (reason === null && decoded !== null) {
+      check(
+        `votes[${i}].selection (${vote.account})`,
+        `[${vote.selection.join(",")}]`,
+        `[${decoded.join(",")}]`,
+      );
+    }
+  }
+
+  const late = doc.lateBallots ?? [];
+  for (let j = 0; j < late.length; j++) {
+    const ballot = late[j] as (typeof late)[number];
+    if (ballot.timestamp < roundTime) {
+      check(
+        `late_ballots[${j}].timestamp (${ballot.account})`,
+        String(ballot.timestamp),
+        `at or after round_time (${roundTime})`,
+      );
+    }
+  }
+  return diffs;
+}
+
+/**
  * Verify one tally document against Gateway state.
  *
  * `expectedHash` is the on-chain `tally_hash` when the caller has it (or the envelope's
@@ -221,10 +392,22 @@ export async function verifyTallyDocument(
     if (document !== recomputed) consistencyDifferences.push({ field, document, recomputed });
   };
   // The equality is a v22 rule: that is the version whose `weight_rule` the current text
-  // describes. An older document states the rule of its own vintage, which is legitimately not
-  // today's text and is still committed by the hash.
-  if (doc.tallyDocVersion !== null && doc.tallyDocVersion >= 22 && doc.weightRule !== null) {
+  // describes. v23 appends the sealed sentences to it, which this verifier does not reproduce
+  // word for word (the reference engine owns that text), so a v23 document is checked for the
+  // v22 prefix only — enough to catch a rule swapped wholesale without inventing an equality
+  // against text no side of this repo has pinned. Older documents state the rule of their own
+  // vintage, which is legitimately not today's text and is still committed by the hash.
+  if (doc.tallyDocVersion === 22 && doc.weightRule !== null) {
     checkConsistent("weight_rule", doc.weightRule, weightRuleText(doc.weightConfig));
+  } else if (doc.tallyDocVersion === 23 && doc.weightRule !== null) {
+    const prefix = weightRuleText(doc.weightConfig);
+    if (!doc.weightRule.startsWith(prefix)) {
+      consistencyDifferences.push({
+        field: "weight_rule",
+        document: doc.weightRule.slice(0, 200),
+        recomputed: `${prefix.slice(0, 200)}… followed by the v23 sealed sentences`,
+      });
+    }
   }
   const registerProblem = spaceRegisterProblem(doc.weightConfig, doc.weightSources);
   if (registerProblem !== null) {
@@ -250,6 +433,17 @@ export async function verifyTallyDocument(
       canonicalize(doc.excludedAccounts),
       canonicalize(options.excludedSet.accounts),
     );
+  }
+
+  // v23: the sealed claims need no Gateway at all, so they are settled before any read. A
+  // document already refused here is FIGURES whatever the Gateway would have said; running the
+  // weight walk first would let an unreachable Gateway turn a definite finding into UNKNOWN.
+  const sealedClaimDifferences = await compareSealedClaims(doc);
+  if (sealedClaimDifferences.length > 0) {
+    return {
+      kind: "figures",
+      differences: [...consistencyDifferences, ...sealedClaimDifferences],
+    };
   }
 
   let mirrorDifferences: Difference[] = [];
