@@ -16,7 +16,7 @@ import type { Json } from "./canonical.ts";
 import { WeightRuleError } from "./concentrated.ts";
 import { Dec } from "./decimal.ts";
 import { DocumentError, parseTallyDocument } from "./document.ts";
-import type { PinnedExcludedSet, PinnedWeightSet, TallyDocument } from "./document.ts";
+import type { PinnedExcludedSet, PinnedWeightSet, SealedSelectionRules, TallyDocument } from "./document.ts";
 import type { Sides } from "./framework.ts";
 import { GatewayError } from "./gateway.ts";
 import type { GatewayClient } from "./gateway.ts";
@@ -198,9 +198,11 @@ export async function compareSealedClaims(doc: TallyDocument): Promise<Differenc
     if (document !== recomputed) diffs.push({ field, document, recomputed });
   };
 
-  // An unrecognised box counts NO ballots (spec §6.4). The verifier cannot re-read the registry
-  // to confirm recognition, but it can refuse a document whose own claim and ballot list
-  // contradict each other: `box_recognised: false` beside a counted ballot cannot be honest.
+  // An unrecognised box counts NO ballots (spec §6.4): the engine reads nothing from such a box,
+  // writes every field after `box_recognised` as null (the parser has already held the block to
+  // that), and publishes the empty tally. The verifier cannot re-read the registry to confirm
+  // recognition, and opens nothing either: there is no round and no signature to open with. What
+  // it can refuse is a document whose own claim and ballot lists contradict each other.
   if (!sealed.boxRecognised) {
     check(
       "sealed.box_recognised (with ballots)",
@@ -215,19 +217,21 @@ export async function compareSealedClaims(doc: TallyDocument): Promise<Differenc
     return diffs;
   }
 
-  // The chain is quicknet and nothing else (spec §10): the chain hash is checked against the
-  // published info, and the public key with it, because a signature verified against a key this
-  // verifier does not know proves nothing about the ballots' timelock.
-  const chainOk =
-    sealed.chainHash.toLowerCase() === QUICKNET_CHAIN.chainHash &&
-    sealed.publicKey.toLowerCase() === QUICKNET_CHAIN.publicKey;
-  check("sealed.chain_hash", sealed.chainHash.toLowerCase(), QUICKNET_CHAIN.chainHash);
-  check("sealed.public_key", sealed.publicKey.toLowerCase(), QUICKNET_CHAIN.publicKey);
-  if (!chainOk) return diffs;
-
+  // The parser guarantees every field below is present on a recognised box.
+  const chainHash = (sealed.chainHash as string).toLowerCase();
+  const publicKey = (sealed.publicKey as string).toLowerCase();
   const round = sealed.round as number;
   const roundTime = sealed.roundTime as number;
   const signature = sealed.signature as string;
+  const block = sealed.rules as SealedSelectionRules;
+
+  // The chain is quicknet and nothing else (spec §10): the chain hash is checked against the
+  // published info, and the public key with it, because a signature verified against a key this
+  // verifier does not know proves nothing about the ballots' timelock.
+  const chainOk = chainHash === QUICKNET_CHAIN.chainHash && publicKey === QUICKNET_CHAIN.publicKey;
+  check("sealed.chain_hash", chainHash, QUICKNET_CHAIN.chainHash);
+  check("sealed.public_key", publicKey, QUICKNET_CHAIN.publicKey);
+  if (!chainOk) return diffs;
 
   // T = vote_end + margin; round = floor((T - genesis) / period) + 1 (spec §1). Every layer
   // computes it, so a document that publishes another round or round_time is not this vote's.
@@ -235,7 +239,7 @@ export async function compareSealedClaims(doc: TallyDocument): Promise<Differenc
     check("sealed.round_time", String(roundTime), "vote_end is absent from the document");
   } else {
     try {
-      const expected = sealingRound(doc.voteEnd, sealed.roundMarginSeconds, QUICKNET_CHAIN);
+      const expected = sealingRound(doc.voteEnd, sealed.roundMarginSeconds as number, QUICKNET_CHAIN);
       check("sealed.round", String(round), String(expected.round));
       check("sealed.round_time", String(roundTime), String(expected.roundTime));
     } catch (e) {
@@ -269,28 +273,36 @@ export async function compareSealedClaims(doc: TallyDocument): Promise<Differenc
     seen.add(account);
   }
 
-  // The selection rules `cast_vote` applies. The document does not carry `max_selections` (it
-  // does not on an open vote either), so the approval cap the creator chose cannot be checked
-  // here; `optionCount` is the tightest bound the range and ordering rules already imply and
-  // adds nothing of its own. `candidate_count` under Majority Judgment is derived from the
-  // totals width, as the verdict already derives it.
+  // The selection rules the ballots are judged by are the block's own, which is how the engine
+  // judged them: `max_selections` exists nowhere else in the document, so the block is the only
+  // place the approval cap can be read from. Four of the five are also implied by the rest of
+  // the document, and are held to it, so a block cannot loosen a rule the tally itself states:
+  // `abstain_allowed` is the top-level field, `majority_judgment` is an Election under the
+  // MajorityJudgment seat rule, `option_count` is the width of `totals` (the engine sizes both
+  // from one index space), and on an Election `option_count` is the candidate count, five per
+  // candidate under Majority Judgment. The cap itself has no second source in the document;
+  // it is committed by the hash, and checking it against the consultation needs the registry.
   const majorityJudgment = doc.kind === "Election" && doc.seatRule === "MajorityJudgment";
-  const optionCount = doc.options.length > 0 ? doc.options.length : doc.totals.length;
-  const candidateCount = majorityJudgment ? doc.totals.length / 5 : 0;
-  const rules: SelectionRules = {
-    abstainAllowed: doc.abstainAllowed ?? true,
-    maxSelections: optionCount,
-    candidateCount,
-    majorityJudgment,
-    optionCount,
-  };
-  if (doc.abstainAllowed === null) {
-    diffs.push({
-      field: "abstain_allowed",
-      document: "absent",
-      recomputed: "the rule a sealed ballot's abstention is checked against",
-    });
+  check("sealed.abstain_allowed", String(block.abstainAllowed), String(doc.abstainAllowed ?? "absent"));
+  check("sealed.majority_judgment", String(block.majorityJudgment), String(majorityJudgment));
+  check("sealed.option_count", String(block.optionCount), String(doc.totals.length));
+  if (doc.kind === "Election") {
+    const space = block.majorityJudgment ? block.candidateCount * 5 : block.candidateCount;
+    check(
+      "sealed.candidate_count",
+      String(block.candidateCount),
+      block.optionCount === space
+        ? String(block.candidateCount)
+        : `a candidate count whose index space is ${block.optionCount}`,
+    );
   }
+  const rules: SelectionRules = {
+    abstainAllowed: block.abstainAllowed,
+    maxSelections: block.maxSelections,
+    candidateCount: block.candidateCount,
+    majorityJudgment: block.majorityJudgment,
+    optionCount: block.optionCount,
+  };
 
   for (let i = 0; i < doc.votes.length; i++) {
     const vote = doc.votes[i] as (typeof doc.votes)[number];
@@ -320,7 +332,18 @@ export async function compareSealedClaims(doc: TallyDocument): Promise<Differenc
     }
     const published = vote.sealedInvalid ?? "valid";
     check(`votes[${i}].sealed_invalid (${vote.account})`, published, reason ?? "valid");
-    if (reason === null && decoded !== null) {
+    if (vote.sealedInvalid !== null) {
+      // An invalid ballot is judged by its reason token alone. The engine renders it with an
+      // empty selection (`validate_plaintext` answers no selection on an error), so whatever the
+      // plaintext held is not compared; only the empty rendering is held.
+      if (vote.selection.length > 0) {
+        diffs.push({
+          field: `votes[${i}].selection (${vote.account})`,
+          document: `[${vote.selection.join(",")}]`,
+          recomputed: "[] (an invalid sealed ballot publishes no selection)",
+        });
+      }
+    } else if (reason === null && decoded !== null) {
       check(
         `votes[${i}].selection (${vote.account})`,
         `[${vote.selection.join(",")}]`,
@@ -391,23 +414,16 @@ export async function verifyTallyDocument(
   const checkConsistent = (field: string, document: string, recomputed: string): void => {
     if (document !== recomputed) consistencyDifferences.push({ field, document, recomputed });
   };
-  // The equality is a v22 rule: that is the version whose `weight_rule` the current text
-  // describes. v23 appends the sealed sentences to it, which this verifier does not reproduce
-  // word for word (the reference engine owns that text), so a v23 document is checked for the
-  // v22 prefix only — enough to catch a rule swapped wholesale without inventing an equality
-  // against text no side of this repo has pinned. Older documents state the rule of their own
-  // vintage, which is legitimately not today's text and is still committed by the hash.
-  if (doc.tallyDocVersion === 22 && doc.weightRule !== null) {
-    checkConsistent("weight_rule", doc.weightRule, weightRuleText(doc.weightConfig));
-  } else if (doc.tallyDocVersion === 23 && doc.weightRule !== null) {
-    const prefix = weightRuleText(doc.weightConfig);
-    if (!doc.weightRule.startsWith(prefix)) {
-      consistencyDifferences.push({
-        field: "weight_rule",
-        document: doc.weightRule.slice(0, 200),
-        recomputed: `${prefix.slice(0, 200)}… followed by the v23 sealed sentences`,
-      });
-    }
+  // The equality holds for v22 and v23, the two versions whose `weight_rule` texts this verifier
+  // pins (v23 is the v22 text with the engine's sealed sentences appended to the `XRD` rule).
+  // Older documents state the rule of their own vintage, which is legitimately not today's text
+  // and is still committed by the hash.
+  if ((doc.tallyDocVersion === 22 || doc.tallyDocVersion === 23) && doc.weightRule !== null) {
+    checkConsistent(
+      "weight_rule",
+      doc.weightRule,
+      weightRuleText(doc.weightConfig, doc.tallyDocVersion),
+    );
   }
   const registerProblem = spaceRegisterProblem(doc.weightConfig, doc.weightSources);
   if (registerProblem !== null) {

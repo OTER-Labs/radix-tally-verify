@@ -145,10 +145,20 @@ A **sealed** vote (v23, `sealed` present) adds checks that need no Gateway: the 
 signature is verified against `sealed.public_key` for `sealed.round`, the chain hash and public
 key against quicknet's published info, `round` and `round_time` against the §1 formula from
 `vote_end`, every `votes` ciphertext is opened with tlock-js and its selection and invalid reason
-are recomputed under the `cast_vote` selection rules, and the late cut is applied — a `votes` row
-at or after `round_time` and a `late_ballots` row before it are both refused. A ballot the engine
-ruled invalid (`sealed_invalid`) is rendered and weighed like an excluded one but reaches no
-option, no `total_weight`, no `voter_count` and no `abstain_weight`. `--reread-ballots` adds the
+are recomputed under the selection rules the `sealed` block publishes (`max_selections`,
+`abstain_allowed`, `majority_judgment`, `candidate_count`, `option_count`, the rules `cast_vote`
+applies), and the late cut is applied — a `votes` row at or after `round_time` and a
+`late_ballots` row before it are both refused. Four of those rules are also held to the rest of
+the document (`abstain_allowed` to the top-level field, `majority_judgment` to the kind and seat
+rule, `option_count` to the width of `totals`, and on an Election `candidate_count` to the index
+space); `max_selections` appears nowhere else, so it is committed by the hash but checking it
+against the consultation needs the registry. A plaintext that is not UTF-8 is `malformed`. A
+ballot the engine ruled invalid (`sealed_invalid`) is rendered with an empty selection and
+weighed like an excluded one but reaches no option, no `total_weight`, no `voter_count` and no
+`abstain_weight`; its reason token is compared, its plaintext's selection is not. Weight
+delegated to it still counts in `delegated_weight_total` and is lost with the ballot, as the
+engine counts it. A box the registry does not recognise (`box_recognised: false`) carries null
+round and rule fields, no ballots and the empty tally, and nothing is opened. `--reread-ballots` adds the
 one check that reads the ledger's own record: every `SealedBallotCastEvent` of `sealed.box` for
 the vote, latest timely per account plus every late one, is compared with the document.
 
@@ -203,7 +213,8 @@ answer with no item for that resource, or with no `explicit_metadata` block at a
 The empty string means one thing only — the resource answered and declares no symbol.
 
 `weight_rule` is checked too: when the document carries it, it must equal the text its own
-`weight_config` implies, and a different sentence is a figure difference. `weight_sources` must
+`weight_config` and version imply (v22 or v23; v23 appends the engine's sealed sentences to the
+`Xrd` rule), and a different sentence is a figure difference. `weight_sources` must
 equal the register that config implies — a `Fungible` or `Membership` document carries its one
 space leg and none of the XRD-priced valuation legs, while an `Xrd` document carries neither
 space leg.

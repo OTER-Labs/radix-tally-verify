@@ -16,7 +16,7 @@ import type { Json } from "../src/canonical.ts";
 import { ELIGIBLE_DERIVATION, FRAMEWORK_SOURCE } from "../src/framework.ts";
 import { OFFICIAL_RULE_TEXT, readOfficialEntry } from "../src/mirror.ts";
 import { verifyTallyDocument } from "../src/verify.ts";
-import { XRD_WEIGHT_RULE } from "../src/weight-rule.ts";
+import { XRD_WEIGHT_RULE_V22 } from "../src/weight-rule.ts";
 
 import { FakeGateway, SNAPSHOT_SV, XRD } from "./fake-gateway.ts";
 
@@ -91,7 +91,7 @@ function mjDocument(over: Record<string, unknown> = {}, ballotSourceOver: Record
     weight_config: { kind: "Xrd" },
     term_seconds: 0,
     asset_symbol: "XRD",
-    weight_rule: XRD_WEIGHT_RULE,
+    weight_rule: XRD_WEIGHT_RULE_V22,
     weight_sources: { native_pools: { mode: "all" } },
     weight_set_version: 0,
     excluded_set_version: 0,

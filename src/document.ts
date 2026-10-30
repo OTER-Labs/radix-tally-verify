@@ -68,11 +68,13 @@ import type {
  *   - **23 — SEALED VOTES.** A consultation may be sealed: ballots are tlock ciphertexts opened
  *     after their drand round, off-chain. A top-level `sealed` block (`box`, `box_package`,
  *     `box_recognised`, `round`, `round_time`, `round_margin_seconds`, `chain_hash`,
- *     `public_key`, `signature`), per-vote `ciphertext` / `intent_hash` / `timestamp` and
- *     `sealed_invalid` (a reason, absent when valid), and `late_ballots` (account, intent hash,
- *     timestamp, ciphertext). Present only on a sealed vote, so an open document differs from
- *     v22 only by the version and the rule text. The weight rule itself gains the sealed
- *     sentences, which is why every document's hash moves.
+ *     `public_key`, `signature`, and the selection rules `max_selections`, `abstain_allowed`,
+ *     `majority_judgment`, `candidate_count`, `option_count`; every field after `box_recognised`
+ *     null on an unrecognised box), per-vote `ciphertext` / `intent_hash` / `timestamp` and
+ *     `sealed_invalid` (a reason, absent when valid; an invalid ballot's `selection` is `[]`),
+ *     and `late_ballots` (account, intent hash, timestamp, ciphertext). Present only on a sealed
+ *     vote, so an open document differs from v22 only by the version and the rule text. The
+ *     `Xrd` weight rule gains the sealed sentences, which is why every document's hash moves.
  *
  *   - **mirror tallies** — the additive `ballot_source` block
  *     that turns a document into a reproduction of an official Radix DAO Temperature Check or
@@ -355,11 +357,27 @@ export interface TallyVote {
 }
 
 /**
+ * v23: the selection rules the engine judged the sealed ballots by, as the `sealed` block
+ * publishes them: the rules `cast_vote` applies to an open ballot of the same consultation.
+ * `optionCount` is the INDEX SPACE (the option count, the candidate count for an election, five
+ * per candidate under Majority Judgment), and `majorityJudgment` swaps the selection cap from
+ * `maxSelections` to `candidateCount`.
+ */
+export interface SealedSelectionRules {
+  maxSelections: number;
+  abstainAllowed: boolean;
+  majorityJudgment: boolean;
+  candidateCount: number;
+  optionCount: number;
+}
+
+/**
  * v23: the sealed-vote block, present only on a sealed vote.
  *
  * `box_recognised` is the registry's claim that the box's package is a known
  * `sealed_ballot_box_v1` package. An unrecognised box counts no ballots: its honest tally is the
- * empty one, and the block carries no round.
+ * empty one, and every field after `box_recognised` is null (the engine's `SealedBallots::block`).
+ * On a recognised box every one of them is present.
  */
 export interface SealedBlock {
   box: string;
@@ -369,12 +387,16 @@ export interface SealedBlock {
   round: number | null;
   /** The round's wall clock; `null` on an unrecognised box. */
   roundTime: number | null;
-  roundMarginSeconds: number;
-  chainHash: string;
-  publicKey: string;
+  /** The box's margin after `vote_end`; `null` on an unrecognised box. */
+  roundMarginSeconds: number | null;
+  /** The box's drand chain; `null` on an unrecognised box. */
+  chainHash: string | null;
+  publicKey: string | null;
   /** The round's drand signature, verified before any ballot is opened; `null` on an
    * unrecognised box. */
   signature: string | null;
+  /** The selection rules every ballot was judged by; `null` on an unrecognised box. */
+  rules: SealedSelectionRules | null;
 }
 
 /** v23: a ballot the box recorded at or after `round_time`. It counts toward nothing. */
@@ -612,10 +634,10 @@ function reqBool(doc: Record<string, unknown>, field: string): boolean {
   return v;
 }
 
-function optBool(doc: Record<string, unknown>, field: string): boolean | null {
+function optBool(doc: Record<string, unknown>, field: string, path: string = field): boolean | null {
   const v = doc[field];
   if (v === null || v === undefined) return null;
-  if (typeof v !== "boolean") fail(field, "is neither null nor a boolean");
+  if (typeof v !== "boolean") fail(path, "is neither null nor a boolean");
   return v;
 }
 
@@ -642,10 +664,11 @@ function parseSealedInvalid(v: unknown, path: string): SealedInvalid | null {
 }
 
 /**
- * v23: the `sealed` block. Absent is an open vote. A recognised box must name its round, the
- * round's wall clock and the signature; an unrecognised box is the exact complement (spec §6.4),
- * and carrying round fields would make `box_recognised: false` and a counted tally contradict
- * each other in the same hashed document.
+ * v23: the `sealed` block. Absent is an open vote. A recognised box must carry every field: its
+ * round, the round's wall clock, the margin, the chain, the signature and the five selection
+ * rules. An unrecognised box is the exact complement: the engine writes every field after
+ * `box_recognised` as null (spec §6.4), and a block that carried a round or a rule beside
+ * `box_recognised: false` would contradict itself inside the hashed document.
  */
 function parseSealedBlock(raw: unknown): SealedBlock | null {
   if (raw === undefined || raw === null) return null;
@@ -655,17 +678,47 @@ function parseSealedBlock(raw: unknown): SealedBlock | null {
   const boxRecognised = reqBool(o, "box_recognised");
   const round = optInt(o, "round", "sealed.round");
   const roundTime = optInt(o, "round_time", "sealed.round_time");
-  const roundMarginSeconds = reqInt(o, "round_margin_seconds", "sealed.round_margin_seconds");
-  const chainHash = reqString(o, "chain_hash", "sealed.chain_hash");
-  const publicKey = reqString(o, "public_key", "sealed.public_key");
+  const roundMarginSeconds = optInt(o, "round_margin_seconds", "sealed.round_margin_seconds");
+  const chainHash = optString(o, "chain_hash", "sealed.chain_hash");
+  const publicKey = optString(o, "public_key", "sealed.public_key");
   const signature = optString(o, "signature", "sealed.signature");
+  const maxSelections = optInt(o, "max_selections", "sealed.max_selections");
+  const abstainAllowed = optBool(o, "abstain_allowed", "sealed.abstain_allowed");
+  const majorityJudgment = optBool(o, "majority_judgment", "sealed.majority_judgment");
+  const candidateCount = optInt(o, "candidate_count", "sealed.candidate_count");
+  const optionCount = optInt(o, "option_count", "sealed.option_count");
+  const fields: Array<[string, unknown]> = [
+    ["round", round],
+    ["round_time", roundTime],
+    ["round_margin_seconds", roundMarginSeconds],
+    ["chain_hash", chainHash],
+    ["public_key", publicKey],
+    ["signature", signature],
+    ["max_selections", maxSelections],
+    ["abstain_allowed", abstainAllowed],
+    ["majority_judgment", majorityJudgment],
+    ["candidate_count", candidateCount],
+    ["option_count", optionCount],
+  ];
   if (boxRecognised) {
-    if (round === null) fail("sealed.round", "is missing on a recognised box");
-    if (roundTime === null) fail("sealed.round_time", "is missing on a recognised box");
-    if (signature === null) fail("sealed.signature", "is missing on a recognised box");
-  } else if (round !== null || roundTime !== null || signature !== null) {
-    fail("sealed", "carries round fields for an unrecognised box");
+    for (const [name, value] of fields) {
+      if (value === null) fail(`sealed.${name}`, "is missing on a recognised box");
+    }
+  } else {
+    const carried = fields.filter(([, value]) => value !== null).map(([name]) => name);
+    if (carried.length > 0) {
+      fail("sealed", `carries ${carried.join(", ")} for an unrecognised box`);
+    }
   }
+  const rules: SealedSelectionRules | null = boxRecognised
+    ? {
+        maxSelections: maxSelections as number,
+        abstainAllowed: abstainAllowed as boolean,
+        majorityJudgment: majorityJudgment as boolean,
+        candidateCount: candidateCount as number,
+        optionCount: optionCount as number,
+      }
+    : null;
   return {
     box,
     boxPackage,
@@ -676,6 +729,7 @@ function parseSealedBlock(raw: unknown): SealedBlock | null {
     chainHash,
     publicKey,
     signature,
+    rules,
   };
 }
 

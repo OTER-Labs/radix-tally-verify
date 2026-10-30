@@ -30,7 +30,12 @@ import {
 } from "../src/sealed.ts";
 import type { SealedChain, SealedInvalid, SelectionRules } from "../src/sealed.ts";
 import { verifyTallyDocument } from "../src/verify.ts";
-import { XRD_WEIGHT_RULE } from "../src/weight-rule.ts";
+import {
+  SEALED_WEIGHT_RULE_SENTENCES,
+  XRD_WEIGHT_RULE,
+  XRD_WEIGHT_RULE_V22,
+  weightRuleText,
+} from "../src/weight-rule.ts";
 
 import { ACCOUNT_A, FakeGateway, scenarioGateway } from "./fake-gateway.ts";
 
@@ -93,6 +98,9 @@ const docBallot = (name: string): (typeof DOC_BALLOTS)["ballots"][number] => {
 };
 
 const chain = (): SealedChain => QUICKNET_CHAIN;
+
+/** Stokenet XRD: the reference engine's dumped documents are Stokenet documents. */
+const STOKENET_XRD = "resource_tdx_2_1tknxxxxxxxxxradxrdxxxxxxxxx009923554798xxxxxxxxxradxrd";
 
 /* ------------------------------------------------------------------------------------------
  * The round, the signature, and the ciphertexts — the engine's exact arithmetic and fixtures.
@@ -290,6 +298,11 @@ function sealedDocument(over: Record<string, unknown> = {}): Record<string, unkn
       chain_hash: QUICKNET_CHAIN.chainHash,
       public_key: QUICKNET_CHAIN.publicKey,
       signature: SIGNATURE,
+      max_selections: 3,
+      abstain_allowed: true,
+      majority_judgment: false,
+      candidate_count: 0,
+      option_count: 3,
     },
     late_ballots: [],
     ...over,
@@ -360,7 +373,7 @@ test("a v22 document still verifies", async () => {
     kind: "Poll",
     options: ["Reject", "Approve"],
     snapshot_state_version: 1000000,
-    weight_rule: XRD_WEIGHT_RULE,
+    weight_rule: XRD_WEIGHT_RULE_V22,
     weight_sources: { native_pools: { mode: "all" } },
     excluded_accounts: [],
     votes: [],
@@ -391,14 +404,14 @@ test("a v22 document still verifies", async () => {
 });
 
 test("the empty v23 document verifies", async () => {
-  // The shape Task 9's `a_sealed_vote_with_no_ballots_yields_an_empty_v23_document`
-  // publishes: the sealed block, no votes, and an empty tally. The fixture is built from
-  // spec 6.6 because that test was written in parallel; no Gateway read is needed for it.
-  const doc = load("empty_v23.json");
+  // The reference engine's own output for a sealed vote nobody cast in, with its hash.
+  const file = load("engine/empty.json");
+  const doc = file["document"] as Record<string, unknown>;
   assert.equal(doc["tally_doc_version"], 23);
+  assert.deepEqual(doc["votes"], []);
   assert.deepEqual(
-    await verifyTallyDocument(doc, null, new FakeGateway(), "resource_rdx1tknxxxxxxxxxradxrdxxxxxxxxx009923554798xxxxxxxxxradxrd"),
-    { kind: "match", hashChecked: false },
+    await verifyTallyDocument(file, null, new FakeGateway(), STOKENET_XRD),
+    { kind: "match", hashChecked: true },
   );
 });
 
@@ -429,43 +442,50 @@ test("an invalid sealed ballot counts toward nothing", async () => {
 });
 
 test("a vote sealed to an unrecognised box counts nothing", async () => {
-  const unrecognised = sealedDocument({
-    votes: [],
-    totals: ["0", "0", "0"],
-    total_weight: "0",
-    voter_count: 0,
-    sealed: {
-      box: "component_rdx1lookalike",
-      box_package: "package_rdx1lookalike",
-      box_recognised: false,
-      round: null,
-      round_time: null,
-      round_margin_seconds: 300,
-      chain_hash: QUICKNET_CHAIN.chainHash,
-      public_key: QUICKNET_CHAIN.publicKey,
-      signature: null,
-    },
+  // The engine's document for a box whose package the module does not record: every field after
+  // `box_recognised` is null, no ballot is listed and the tally is empty. Nothing is opened and
+  // no Gateway read is made.
+  const file = load("engine/unrecognised.json");
+  const doc = file["document"] as Record<string, unknown>;
+  const sealed = doc["sealed"] as Record<string, unknown>;
+  assert.equal(sealed["box_recognised"], false);
+  for (const key of [
+    "round",
+    "round_time",
+    "round_margin_seconds",
+    "chain_hash",
+    "public_key",
+    "signature",
+    "max_selections",
+    "abstain_allowed",
+    "majority_judgment",
+    "candidate_count",
+    "option_count",
+  ]) {
+    assert.equal(sealed[key], null, key);
+  }
+  const gw = new FakeGateway();
+  assert.deepEqual(await verifyTallyDocument(file, null, gw, STOKENET_XRD), {
+    kind: "match",
+    hashChecked: true,
   });
-  assert.deepEqual(
-    await verifyTallyDocument(unrecognised, null, scenarioGateway(), "resource_rdx1tknxxxxxxxxxradxrdxxxxxxxxx009923554798xxxxxxxxxradxrd"),
-    { kind: "match", hashChecked: false },
-  );
+  assert.deepEqual(gw.calls, []);
+
+  // A round or a rule beside `box_recognised: false` is a block the engine never writes.
+  for (const [key, value] of [
+    ["chain_hash", QUICKNET_CHAIN.chainHash],
+    ["round_margin_seconds", 30],
+    ["max_selections", 3],
+  ] as const) {
+    const withField = structuredClone(doc);
+    (withField["sealed"] as Record<string, unknown>)[key] = value;
+    const outcome = await verifyTallyDocument(withField, null, new FakeGateway(), STOKENET_XRD);
+    assert.equal(outcome.kind, "malformed", key);
+  }
 
   // The contradiction the verifier can see without the registry: a counted ballot beside
   // `box_recognised: false`.
-  const contradiction = sealedDocument({
-    sealed: {
-      box: "component_rdx1lookalike",
-      box_package: "package_rdx1lookalike",
-      box_recognised: false,
-      round: null,
-      round_time: null,
-      round_margin_seconds: 300,
-      chain_hash: QUICKNET_CHAIN.chainHash,
-      public_key: QUICKNET_CHAIN.publicKey,
-      signature: null,
-    },
-  });
+  const contradiction = sealedDocument({ sealed });
   const outcome = await verifyTallyDocument(contradiction, null, scenarioGateway(), "resource_rdx1tknxxxxxxxxxradxrdxxxxxxxxx009923554798xxxxxxxxxradxrd");
   assert.equal(outcome.kind, "figures");
 });
@@ -544,4 +564,236 @@ test("a v23 document parses its sealed block and per-vote fields", () => {
   }).doc;
   assert.equal(open.sealed, null);
   assert.equal(open.lateBallots, null);
+});
+
+/* ------------------------------------------------------------------------------------------
+ * The reference engine's own v23 documents (OTER `feat/sealed-box` 3b9e9fc5, dumped from
+ * `sealed_tally_tests.rs` with their `document_hash_blake2b`). Every account there holds 100 XRD
+ * and nothing else at the snapshot, which `engineGateway` answers.
+ * ---------------------------------------------------------------------------------------- */
+
+const ENGINE_DOCUMENTS = [
+  "empty",
+  "valid_approval",
+  "abstention",
+  "invalid_per_reason",
+  "late",
+  "over_cap",
+  "delegator_revoked",
+  "delegated_to_invalid",
+  "unrecognised",
+] as const;
+
+type EngineFile = { document: Record<string, unknown>; document_hash_blake2b: string };
+
+const engineFile = (name: (typeof ENGINE_DOCUMENTS)[number]): EngineFile =>
+  load(`engine/${name}.json`) as unknown as EngineFile;
+
+/** The weights the engine's stand-in Gateway gave: 100 XRD for every account it weighed (every
+ * voter and every delegator), at the document's snapshot, and no validators. */
+function engineGateway(doc: Record<string, unknown>): FakeGateway {
+  const votes = doc["votes"] as Array<{ account: string }>;
+  const delegations = (doc["delegations"] ?? []) as Array<{ delegator: string }>;
+  const accounts = [...new Set([...votes.map((v) => v.account), ...delegations.map((d) => d.delegator)])];
+  if (accounts.length === 0) return new FakeGateway();
+  return new FakeGateway()
+    .onDetails({
+      ledger_state: { state_version: doc["snapshot_state_version"] },
+      items: accounts.map((address) => ({
+        address,
+        fungible_resources: {
+          total_count: 1,
+          next_cursor: null,
+          items: [{ resource_address: STOKENET_XRD, amount: "100" }],
+        },
+      })),
+    })
+    .onValidators({ items: [], next_cursor: null });
+}
+
+async function verifyEngine(doc: Record<string, unknown>, hash: string | null) {
+  return verifyTallyDocument(doc, hash, engineGateway(doc), STOKENET_XRD);
+}
+
+/** The differences a tampered engine document is reported with (its hash no longer applies). */
+async function differencesOf(doc: Record<string, unknown>): Promise<Array<{ field: string; document: string; recomputed: string }>> {
+  const outcome = await verifyEngine(doc, null);
+  assert.equal(outcome.kind, "figures", JSON.stringify(outcome));
+  return outcome.kind === "figures" ? outcome.differences : [];
+}
+
+test("every engine v23 document verifies with its hash", async () => {
+  for (const name of ENGINE_DOCUMENTS) {
+    const file = engineFile(name);
+    assert.equal(file.document["tally_doc_version"], 23, name);
+    assert.deepEqual(
+      await verifyEngine(file.document, file.document_hash_blake2b),
+      { kind: "match", hashChecked: true },
+      name,
+    );
+  }
+});
+
+test("the v23 weight rule is the engine's text, checked for equality", async () => {
+  for (const name of ENGINE_DOCUMENTS) {
+    assert.equal(engineFile(name).document["weight_rule"], weightRuleText({ kind: "Xrd" }, 23), name);
+  }
+  assert.equal(XRD_WEIGHT_RULE, XRD_WEIGHT_RULE_V22 + SEALED_WEIGHT_RULE_SENTENCES);
+  assert.ok(SEALED_WEIGHT_RULE_SENTENCES.startsWith(" Sealed votes: "));
+  // The two space rules did not change in v23.
+  const resource = "resource_tdx_2_1token";
+  assert.equal(weightRuleText({ kind: "Fungible", resource }, 23), weightRuleText({ kind: "Fungible", resource }, 22));
+  assert.equal(weightRuleText({ kind: "Membership", resource }, 23), weightRuleText({ kind: "Membership", resource }, 22));
+
+  // A v23 document that states the v22 text, or the v23 text with one word changed, is refused.
+  for (const rule of [XRD_WEIGHT_RULE_V22, XRD_WEIGHT_RULE.replace("replaces nothing", "replaces the timely one")]) {
+    const doc = structuredClone(engineFile("valid_approval").document);
+    doc["weight_rule"] = rule;
+    const differences = await differencesOf(doc);
+    assert.ok(differences.some((d) => d.field === "weight_rule"), JSON.stringify(differences));
+  }
+});
+
+test("max_selections is enforced on a sealed ballot", async () => {
+  // The engine's document: a Poll capped at one selection, and a ballot that opens to 0,2. The
+  // ballot is invalid only for the cap; every other rule holds.
+  const file = engineFile("over_cap");
+  const sealed = file.document["sealed"] as Record<string, unknown>;
+  assert.equal(sealed["max_selections"], 1);
+  assert.equal(sealed["option_count"], 3);
+  const vote = (file.document["votes"] as Array<Record<string, unknown>>)[0] as Record<string, unknown>;
+  assert.equal(vote["sealed_invalid"], "invalid_selection");
+  assert.deepEqual(vote["selection"], []);
+
+  // Publishing that ballot as counted is refused: the cap the block states rules it out.
+  const counted = structuredClone(file.document);
+  const countedVote = (counted["votes"] as Array<Record<string, unknown>>)[0] as Record<string, unknown>;
+  delete countedVote["sealed_invalid"];
+  countedVote["selection"] = [0, 2];
+  counted["totals"] = ["100", "0", "100"];
+  counted["total_weight"] = "100";
+  counted["voter_count"] = 1;
+  const differences = await differencesOf(counted);
+  const reason = differences.find((d) => d.field.startsWith("votes[0].sealed_invalid"));
+  assert.ok(reason !== undefined, JSON.stringify(differences));
+  assert.equal(reason.document, "valid");
+  assert.equal(reason.recomputed, "invalid_selection");
+
+  // The same ballot under a cap of three counts.
+  const { doc } = parseTallyDocument(sealedDocument());
+  assert.equal(doc.sealed?.rules?.maxSelections, 3);
+});
+
+test("the block's selection rules are held to the rest of the document", async () => {
+  const cases: Array<[string, unknown, string]> = [
+    ["abstain_allowed", false, "sealed.abstain_allowed"],
+    ["majority_judgment", true, "sealed.majority_judgment"],
+    ["option_count", 4, "sealed.option_count"],
+  ];
+  for (const [key, value, field] of cases) {
+    const doc = structuredClone(engineFile("valid_approval").document);
+    (doc["sealed"] as Record<string, unknown>)[key] = value;
+    const differences = await differencesOf(doc);
+    assert.ok(differences.some((d) => d.field === field), `${key}: ${JSON.stringify(differences)}`);
+  }
+});
+
+test("a plaintext that is not UTF-8 is malformed", async () => {
+  const fixture = load("non_utf8.json") as { ciphertext: string; plaintext_hex: string };
+  assert.ok(Buffer.from(fixture.plaintext_hex, "hex").includes(0xff));
+  assert.deepEqual(await openBallot(fixture.ciphertext, chain(), ROUND, SIGNATURE), {
+    ok: false,
+    reason: "malformed",
+  });
+
+  // In a document: published as malformed with no selection, it counts toward nothing.
+  const vote = {
+    account: ACCOUNT_A,
+    selection: [],
+    weight: "125",
+    ciphertext: fixture.ciphertext,
+    intent_hash: "aa".repeat(32),
+    timestamp: 1692806300,
+    sealed_invalid: "malformed",
+  };
+  const honest = sealedDocument({
+    votes: [vote],
+    totals: ["0", "0", "0"],
+    total_weight: "0",
+    voter_count: 0,
+  });
+  assert.deepEqual(
+    await verifyTallyDocument(honest, null, scenarioGateway(), "resource_rdx1tknxxxxxxxxxradxrdxxxxxxxxx009923554798xxxxxxxxxradxrd"),
+    { kind: "match", hashChecked: false },
+  );
+  const asUndecryptable = sealedDocument({
+    votes: [{ ...vote, sealed_invalid: "undecryptable" }],
+    totals: ["0", "0", "0"],
+    total_weight: "0",
+    voter_count: 0,
+  });
+  const outcome = await verifyTallyDocument(asUndecryptable, null, scenarioGateway(), "resource_rdx1tknxxxxxxxxxradxrdxxxxxxxxx009923554798xxxxxxxxxradxrd");
+  assert.equal(outcome.kind, "figures");
+  if (outcome.kind !== "figures") return;
+  const difference = outcome.differences.find((d) => d.field.startsWith("votes[0].sealed_invalid"));
+  assert.ok(difference !== undefined, JSON.stringify(outcome.differences));
+  assert.equal(difference.recomputed, "malformed");
+});
+
+test("an invalid sealed ballot is judged by its reason token and publishes no selection", async () => {
+  // The engine's document: one ballot per reason, each with `selection: []`.
+  const file = engineFile("invalid_per_reason");
+  const votes = file.document["votes"] as Array<Record<string, unknown>>;
+  assert.deepEqual(
+    votes.map((v) => v["sealed_invalid"]),
+    ["undecryptable", "wrong_round", "malformed", "wrong_vote", "invalid_selection"],
+  );
+  for (const v of votes) assert.deepEqual(v["selection"], []);
+
+  // The wrong_vote ballot opens to a valid selection for another account. It is not compared:
+  // the token is. A non-empty selection on an invalid ballot is not the engine's rendering.
+  const withSelection = structuredClone(file.document);
+  ((withSelection["votes"] as Array<Record<string, unknown>>)[3] as Record<string, unknown>)["selection"] = [0, 2];
+  const selectionDiffs = await differencesOf(withSelection);
+  assert.ok(selectionDiffs.some((d) => d.field.startsWith("votes[3].selection")), JSON.stringify(selectionDiffs));
+  assert.ok(!selectionDiffs.some((d) => d.field.startsWith("votes[3].sealed_invalid")), JSON.stringify(selectionDiffs));
+
+  // Another token on the same ballot is refused.
+  const otherToken = structuredClone(file.document);
+  ((otherToken["votes"] as Array<Record<string, unknown>>)[3] as Record<string, unknown>)["sealed_invalid"] = "malformed";
+  const tokenDiffs = await differencesOf(otherToken);
+  const token = tokenDiffs.find((d) => d.field.startsWith("votes[3].sealed_invalid"));
+  assert.ok(token !== undefined, JSON.stringify(tokenDiffs));
+  assert.equal(token.recomputed, "wrong_vote");
+});
+
+test("weight delegated to an invalid sealed ballot is in delegated_weight_total", async () => {
+  // Mirrors the engine: `delegated_weight_by_delegate` (tally_engine.rs) sums every counted
+  // delegation whatever happens to the delegate's ballot, and an invalid sealed ballot is a
+  // ballot for delegation (its account is in `voted`). So the delegator's 100 is counted as
+  // delegated and rides the invalid ballot (delegated_weight 100, effective_weight 200), and is
+  // lost with it: total_weight stays 0. `deriveFigures` resolves the delegations before its
+  // `sealedInvalid` skip, with the same `voted` set, which is what makes the two agree.
+  const file = engineFile("delegated_to_invalid");
+  const doc = file.document;
+  assert.equal(doc["delegated_weight_total"], "100");
+  assert.equal(doc["total_weight"], "0");
+  assert.equal(doc["voter_count"], 0);
+  const vote = (doc["votes"] as Array<Record<string, unknown>>)[0] as Record<string, unknown>;
+  assert.equal(vote["sealed_invalid"], "invalid_selection");
+  assert.equal(vote["delegated_weight"], "100");
+  assert.equal(vote["effective_weight"], "200");
+  const delegation = (doc["delegations"] as Array<Record<string, unknown>>)[0] as Record<string, unknown>;
+  assert.equal(delegation["counted"], true);
+
+  const tampered = structuredClone(doc);
+  tampered["delegated_weight_total"] = "0";
+  const differences = await differencesOf(tampered);
+  const total = differences.find((d) => d.field === "delegated_weight_total");
+  assert.ok(total !== undefined, JSON.stringify(differences));
+  assert.equal(total.recomputed, "100");
+
+  // And the other direction: an invalid ballot by the DELEGATOR revokes its delegation.
+  const revoked = engineFile("delegator_revoked").document;
+  assert.equal(revoked["delegated_weight_total"], "0");
 });

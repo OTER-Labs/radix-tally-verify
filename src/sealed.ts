@@ -8,13 +8,10 @@
  * node's type-stripping refuses files under `node_modules`. The bundle is imported lazily through
  * the package's `#tlock` subpath so the verifier's own modules stay plain erasable TypeScript.
  *
- * Two things differ from `sealed.rs` only because they are not this layer's to decide:
- *
- *   - `sealingRound` throws when the vote ends before the drand chain began. The contract panics
- *     on the same condition; a verifier meeting it in a document reports it as a difference, not
- *     as a crash.
- *   - `openBallot` treats a plaintext that is not valid UTF-8 as `undecryptable`: the file did not
- *     open to a ballot, and `sealed.rs`'s `String` return cannot carry it either.
+ * One thing differs from `sealed.rs` only because it is not this layer's to decide:
+ * `sealingRound` throws when the vote ends before the drand chain began. The contract panics on
+ * the same condition; a verifier meeting it in a document reports it as a difference, not as a
+ * crash.
  */
 
 import { createHash } from "node:crypto";
@@ -175,7 +172,7 @@ export async function verifyRoundSignature(
 
 export type OpenBallotResult =
   | { ok: true; plaintext: string }
-  | { ok: false; reason: "undecryptable" | "wrong_round" };
+  | { ok: false; reason: "undecryptable" | "wrong_round" | "malformed" };
 
 /**
  * Open one armored age ciphertext with the round's signature, mirroring `open_ballot` in
@@ -187,7 +184,9 @@ export type OpenBallotResult =
  *      reason unreachable, which is why the spec pins the order);
  *   3. the file key is derived from the signature and the age file opened; any failure —
  *      including the header MAC or the file-key hash tlock-js records in the stanza — is
- *      `undecryptable`.
+ *      `undecryptable`;
+ *   4. a file that opens to bytes that are not UTF-8 is `malformed`, with no plaintext: the
+ *      engine's `String::from_utf8` refusal, and the reason it caches for that ballot.
  */
 export async function openBallot(
   ciphertext: string,
@@ -254,16 +253,24 @@ export async function openBallot(
     return { ok: false, reason: "undecryptable" };
   }
   try {
-    return { ok: true, plaintext: new TextDecoder("utf-8", { fatal: true }).decode(plaintext) };
+    // `ignoreBOM`: a leading U+FEFF is a character of the plaintext, as it is to Rust's
+    // `String::from_utf8`, not a marker to strip (it then fails the tag as `malformed`).
+    return {
+      ok: true,
+      plaintext: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(plaintext),
+    };
   } catch {
-    return { ok: false, reason: "undecryptable" };
+    return { ok: false, reason: "malformed" };
   }
 }
 
 /**
  * How `cast_vote` decides a selection is castable (contract `consultation_registry.rs`, the
  * abstention, cap, range and ordering asserts). `maxSelections` is the creator's approval cap;
- * under Majority Judgment `candidateCount` replaces it (spec §6.3).
+ * under Majority Judgment `candidateCount` replaces it (spec §6.3). `optionCount` is the INDEX
+ * SPACE, as the engine's `SelectionRules` and the document's `sealed.option_count` carry it: the
+ * option count, the candidate count for an election, the candidate count times the five grades
+ * under Majority Judgment.
  */
 export interface SelectionRules {
   abstainAllowed: boolean;
@@ -319,10 +326,9 @@ export function validatePlaintext(
   const cap = rules.majorityJudgment ? rules.candidateCount : rules.maxSelections;
   if (selection.length > cap) return { ok: false, reason: "invalid_selection" };
 
-  const optionLimit = rules.majorityJudgment ? rules.candidateCount * 5 : rules.optionCount;
   let previous: number | null = null;
   for (const index of selection) {
-    if (index >= optionLimit) return { ok: false, reason: "invalid_selection" };
+    if (index >= rules.optionCount) return { ok: false, reason: "invalid_selection" };
     if (previous !== null && index <= previous) return { ok: false, reason: "invalid_selection" };
     previous = index;
   }
