@@ -1,0 +1,8 @@
+{
+  "comment": "A quicknet round-1000 tlock ciphertext whose plaintext is the four-line format with an invalid UTF-8 byte (0xff) after the selection's first index. Sealed with the pinned tlock-js (timelockEncrypt) for the verifier's malformed case; sealed.rs answers Malformed for a file that opens to bytes that are not UTF-8.",
+  "consultation_id": "7",
+  "account": "account_tdx_2_12yf9gd53yfep7a669fv2t3wm7nz9zeezwd04n02a433ker8vza6rhe",
+  "round": 1000,
+  "plaintext_hex": "6f7465722d7365616c65642d62616c6c6f742d76310a370a6163636f756e745f7464785f325f3132796639676435337966657037613636396676327433776d376e7a397a65657a776430346e3032613433336b657238767a61367268650a30ff",
+  "ciphertext": "-----BEGIN AGE ENCRYPTED FILE-----\nYWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHRsb2NrIDEwMDAgNTJkYjliYTcwZTBj\nYzBmNmVhZjc4MDNkZDA3NDQ3YTFmNTQ3NzczNWZkM2Y2NjE3OTJiYTk0NjAwYzg0\nZTk3MSBlNjQ1ZDQyODIwMWVmOGQ2ZTBkN2MyYTAxNjBhNDRkY2ZiNGFlYzQzNTQ0\nMmI2NDNiNTkyN2U5YTg2OTMyODVmCnVHeWlsWEJDU2hWeEN0SHBrOWpJckxGenBi\nZzdjRm9iTHZ6Y1NneXpZM0xWK2I1V29xaFgzUTNTTGQ0dDZGVDYKRCtWSVFSRDQ2\nSkFHcXJ6M2s4VDZJanVhbDRsRkpaVkJZQmN3bHBpL3ZtbXpPb2FUYnpqZU0vMG9v\ndTVzcHgvWQpML3VXb2NMRVc4RW5NdGUrZkp1ZmZNSEQrRzdXdlVpaXkxZXFTcU4v\ndTF3Ci0tLSBLT211d2VtL09XVVF0V2pFSVVIaTc1MWNjOWYxOWdITzFlM2x6R1h0\nUEtzCs3Xgdh2pS8jXYf+vt51A6otWgllk3Ir5lZMf1KtW+ia0LPe2oBcxYfCBcEK\n6LPv7g83BcVQ9wn65d5fZqQJGnZMsZ6wy2VAqU6IK2+3KKf+qG//sLadakYK3xEp\n5MM2Fjtq7G6rPIDoWzaWo1M56WA5DxvotPjst+iq+rMryTMl\n-----END AGE ENCRYPTED FILE-----\n"
+}

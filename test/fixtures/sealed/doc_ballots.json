@@ -1,0 +1,23 @@
+{
+  "_comment": "Quicknet tlock ballots for the sealed tally document tests, sealed to round 1000 for account_rdx1aaa (the fake Gateway scenario's account A). Made with `cd backend/tools/tlock-encrypt && node encrypt.mjs 0 \"$PLAINTEXT\" 1000`.",
+  "consultation_id": "7",
+  "account": "account_rdx1aaa",
+  "round": 1000,
+  "ballots": [
+    {
+      "name": "valid_approval",
+      "plaintext": "oter-sealed-ballot-v1\n7\naccount_rdx1aaa\n0,2",
+      "selection": [
+        0,
+        2
+      ],
+      "ciphertext": "-----BEGIN AGE ENCRYPTED FILE-----\nYWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHRsb2NrIDEwMDAgNTJkYjliYTcwZTBj\nYzBmNmVhZjc4MDNkZDA3NDQ3YTFmNTQ3NzczNWZkM2Y2NjE3OTJiYTk0NjAwYzg0\nZTk3MSBmYzkyNGY0NDI3OWQ0MmM1Yzk2YWUyZWRiMGRkZmY2ZjA2MzRmOTVjYzhl\nY2Q2NzUyYmUwMmNlNTkyZTg4NmZmCmhveFhYZXl5Ulg3dXExeDNVMGNFNWdPRm50\nampBeXFCTnFMZ1NudkV1T1QvYmQ4d3R0UUxaVGx4bktQN0cxRm4KRHpSTXFWNzNM\nVXRSQXhqVmFPLzJUYkEva2dOdTNuWXpTd1BiMGp6TVYraTA0cS9HRVI4UU1sLzlo\nQ3ZGUHREYgpWWEFwMXVOUXArbUI0aklLTXM0eHpnOUx5L1hJajNLUkhzYUVYL01C\nSXRvCi0tLSBvVUhGYWdoSjRwTkpvaEpqWFMxZHROY1JEV29LK25mMmU2NkhSYXRj\nQlNRCkk6A+XYapXgmU0hqEFk1NT8/0wv8ABPyANN80jm31+ZHKkSfQACW+KgNPxe\nJOZedwWjxU4846Py4SBHpo3rRBfpnzRiyIHnOCsSJQ==\n-----END AGE ENCRYPTED FILE-----"
+    },
+    {
+      "name": "not_increasing",
+      "plaintext": "oter-sealed-ballot-v1\n7\naccount_rdx1aaa\n2,0",
+      "invalid": "invalid_selection",
+      "ciphertext": "-----BEGIN AGE ENCRYPTED FILE-----\nYWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHRsb2NrIDEwMDAgNTJkYjliYTcwZTBj\nYzBmNmVhZjc4MDNkZDA3NDQ3YTFmNTQ3NzczNWZkM2Y2NjE3OTJiYTk0NjAwYzg0\nZTk3MSAwMGQ3YWViZjI4NTllMWM1ZTg5ZWQwYzJkN2JlMGExYWU2NzdjMmRjYzI5\nMDVkZDgyMDg1M2EyYmZiMDZlZTExCnJna3dQKytRQmJJL1puTjY4cDJBMlhBbTVU\nWmV4dk9WVThiNVdrZ2h0NG9waG1iQzc0QUhERDJUL2I2UTZIem0KQTRpdEcrbzhq\nYm9nbmhDS3RLajNuS2t0SGJWeEdHb2NTajFMVzVxWUh3Z1RoSlhsdUlqRnp1NkVj\nb1FaOFBIeApXOHlQVzdMVUxtMDRQTm15T0pRK3Q3YWxqUDRBMllnYXdVdFhMOVc3\nNEZVCi0tLSBDNXFvV0kwcER4eUx6U1VSNkxZWDVNcDh2UnJpd1MyaU1NQjNuSnh3\ndlVRCsMe7YeGR6PC4yUoHqQGZsVoakUiZj1GREWxumlHYyqIWCshbdR5TvhSSaRm\nQW9IagCaPQA64qH0Kz4GoBYnPPlxD4uwo7NyKn6JvQ==\n-----END AGE ENCRYPTED FILE-----"
+    }
+  ]
+}

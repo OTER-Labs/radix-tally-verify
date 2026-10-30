@@ -3,7 +3,7 @@
 Independently recompute a Radix governance consultation's tally from Gateway state, and check it
 against the hash committed on-ledger.
 
-**Status: working. Supported tally document version: 22 (21 was never issued); supported mirror
+**Status: working. Supported tally document version: 23 (21 was never issued); supported mirror
 block version: 3, Temperature Check, Proposal and both Majority Judgment rounds.** The full
 pipeline exists: weight recomputation from Gateway historical state, verdict re-derivation,
 canonical re-serialization, and the hash check, behind a CLI whose exit codes distinguish the
@@ -107,8 +107,14 @@ noise:
   Elections. See "Mirror tallies" below.
 - **`src/weight-rule.ts`** — the rule in words for each space configuration, checked against the
   document's `weight_rule`, and the register each `weight_config` implies.
+- **`src/sealed.ts`** — the sealed-ballot core (v23): the drand quicknet round arithmetic, the
+  round signature check, opening a tlock age ciphertext with tlock-js, and the four-line
+  plaintext's validity rules, all mirroring the registry engine's `sealed.rs`.
+- **`src/events.ts`** — the sealed ballot box's `SealedBallotCastEvent` stream and the comparison
+  `--reread-ballots` makes against a document's `votes` and `late_ballots`.
 - **`src/verify.ts` / `src/cli.ts`** — orchestration and the command line. `--mirror` is not a
-  flag: a document carrying `ballot_source` gets the extra checks automatically.
+  flag: a document carrying `ballot_source` gets the extra checks automatically, and a document
+  carrying `sealed` gets the sealed checks the same way.
 - **`test/`** — cross-implementation agreement, plus weight, concentrated-liquidity, delegation
   and verdict logic against fixture Gateway responses, and each leg driven end to end through the
   whole tool. No test touches the network.
@@ -134,6 +140,27 @@ are switched on. Every leg below is recomputed from Gateway historical state at 
 And the verdict, in full: quorum on both legs, the Binding gates, the DAO-controlled-funds bar,
 Majority Judgment's qualifying grades and gauges at the document's own quantile, `invalid_ballots`,
 the withdrawn-candidate exclusion, and every seat allocation.
+
+A **sealed** vote (v23, `sealed` present) adds checks that need no Gateway: the published drand
+signature is verified against `sealed.public_key` for `sealed.round`, the chain hash and public
+key against quicknet's published info, `round` and `round_time` against the §1 formula from
+`vote_end`, every `votes` ciphertext is opened with tlock-js and its selection and invalid reason
+are recomputed under the selection rules the `sealed` block publishes (`max_selections`,
+`abstain_allowed`, `majority_judgment`, `candidate_count`, `option_count`, the rules `cast_vote`
+applies), and the late cut is applied — a `votes` row at or after `round_time` and a
+`late_ballots` row before it are both refused. Four of those rules are also held to the rest of
+the document (`abstain_allowed` to the top-level field, `majority_judgment` to the kind and seat
+rule, `option_count` to the width of `totals`, and on an Election `candidate_count` to the index
+space); `max_selections` appears nowhere else, so it is committed by the hash but checking it
+against the consultation needs the registry. A plaintext that is not UTF-8 is `malformed`. A
+ballot the engine ruled invalid (`sealed_invalid`) is rendered with an empty selection and
+weighed like an excluded one but reaches no option, no `total_weight`, no `voter_count` and no
+`abstain_weight`; its reason token is compared, its plaintext's selection is not. Weight
+delegated to it still counts in `delegated_weight_total` and is lost with the ballot, as the
+engine counts it. A box the registry does not recognise (`box_recognised: false`) carries null
+round and rule fields, no ballots and the empty tally, and nothing is opened. `--reread-ballots` adds the
+one check that reads the ledger's own record: every `SealedBallotCastEvent` of `sealed.box` for
+the vote, latest timely per account plus every late one, is compared with the document.
 
 A **mirror** document runs every leg above twice — once under the register it carries, as scoped
 to the official component's network (check (g)), once under the official Consultation App's own
@@ -186,7 +213,8 @@ answer with no item for that resource, or with no `explicit_metadata` block at a
 The empty string means one thing only — the resource answered and declares no symbol.
 
 `weight_rule` is checked too: when the document carries it, it must equal the text its own
-`weight_config` implies, and a different sentence is a figure difference. `weight_sources` must
+`weight_config` and version imply (v22 or v23; v23 appends the engine's sealed sentences to the
+`Xrd` rule), and a different sentence is a figure difference. `weight_sources` must
 equal the register that config implies — a `Fungible` or `Membership` document carries its one
 space leg and none of the XRD-priced valuation legs, while an `Xrd` document carries neither
 space leg.
@@ -656,7 +684,7 @@ of those ballots under today's rule rather than a reconstruction of the number p
 ```
 npm install && npm run build
 radix-tally-verify <tally.json | -> [--gateway URL] [--tally-hash HEX] [--xrd-resource ADDR]
-                  [--weight-set FILE] [--excluded-set FILE] [--hash-only]
+                  [--weight-set FILE] [--excluded-set FILE] [--hash-only] [--reread-ballots]
 ```
 
 The input may be the bare document or the API envelope (`{"document": …, "document_hash_blake2b":
@@ -691,6 +719,14 @@ The document's version and `excluded_accounts` are checked against the file.
 document, and exits 0 (or 2 when `--tally-hash` was supplied and does not match). It is an
 encoding check, not a shape check, so an encoding vector that is not a whole tally document can be
 checked with it.
+
+`--reread-ballots` re-reads a sealed ballot box's `SealedBallotCastEvent` stream from the Gateway
+and compares it with a v23 document's `votes` and `late_ballots`: the latest timely event per
+account must be the account's published vote, and every event at or after `round_time` must be a
+published late ballot (and the other way around). It is the one check on a sealed tally that
+reads the ledger's own record of the ballots rather than the document's claims, and it exits 1 on
+a difference before the weight verification runs. The flag needs a v23 sealed document and a
+Gateway that serves `/stream/transactions`.
 
 Exit codes are the contract:
 

@@ -25,7 +25,7 @@ function v22Doc(over: Record<string, unknown> = {}): Record<string, unknown> {
     snapshot_state_version: 1000000,
     excluded_accounts: [],
     weight_sources: { native_pools: { mode: "all" } },
-    weight_rule: weightRuleText({ kind: "Xrd" }),
+    weight_rule: weightRuleText({ kind: "Xrd" }, 22),
     weight_set_version: 6,
     excluded_set_version: 3,
     votes: [
@@ -64,7 +64,7 @@ test("weight_rule must be the text the document's weight_config implies", async 
       {
         field: "weight_rule",
         document: "weight(account) = whatever the publisher liked",
-        recomputed: weightRuleText({ kind: "Xrd" }),
+        recomputed: weightRuleText({ kind: "Xrd" }, 22),
       },
     );
   }

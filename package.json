@@ -1,6 +1,6 @@
 {
   "name": "radix-tally-verify",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Independently recompute a Radix governance consultation's tally from Gateway state and check it against the hash committed on-ledger.",
   "type": "module",
   "license": "Apache-2.0",
@@ -16,17 +16,28 @@
       "default": "./dist/src/index.js"
     }
   },
+  "imports": {
+    "#tlock": "./vendor/tlock-js.cjs"
+  },
+  "files": [
+    "dist/",
+    "vendor/"
+  ],
   "scripts": {
-    "build": "tsc",
-    "prepare": "tsc",
+    "build:tlock": "node scripts/build-tlock.mjs",
+    "build": "npm run build:tlock && tsc",
+    "prepare": "npm run build:tlock && tsc",
+    "pretest": "npm run build:tlock",
     "test": "node --test --experimental-strip-types test/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@noble/hashes": "^1.7.1"
+    "@noble/hashes": "^1.7.1",
+    "tlock-js": "github:a137x/tlock-js#54088f3a69d70b52a8623e76f0905d862c145d0f"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "esbuild": "^0.28.1",
     "typescript": "^5.7.2"
   }
 }
